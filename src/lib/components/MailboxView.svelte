@@ -1,11 +1,23 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { goto, invalidateAll } from '$app/navigation';
 	import { page as currentPage } from '$app/stores';
 	import Icon from './Icon.svelte';
+	import Check from './Check.svelte';
 	import EmptyState from './EmptyState.svelte';
 	import DeliveryStatus from './DeliveryStatus.svelte';
+	import SwipeRow from './SwipeRow.svelte';
+	import PullToRefresh from './PullToRefresh.svelte';
 	import { formatRelativeDate } from '$lib/utils/date';
-	import type { MailboxFilters, MailboxPage, MailboxView, ThreadSummary } from '$lib/types';
+	import { haptic, isPrimaryTab } from '$lib/app-chrome';
+	import { plural, t } from '$lib/i18n';
+	import type {
+		MailAddress,
+		MailboxFilters,
+		MailboxPage,
+		MailboxView,
+		ThreadSummary
+	} from '$lib/types';
 
 	let {
 		view,
@@ -17,33 +29,63 @@
 		filters: MailboxFilters;
 	} = $props();
 
-	const META: Record<MailboxView, { title: string; icon: string; empty: string }> = {
-		inbox: { title: 'Inbox', icon: 'inbox-line', empty: 'Your inbox is empty' },
-		starred: { title: 'Starred', icon: 'star-line', empty: 'No starred messages' },
-		drafts: { title: 'Drafts', icon: 'draft-line', empty: 'No drafts saved' },
-		sent: { title: 'Sent', icon: 'send-plane-line', empty: 'Nothing sent yet' },
-		trash: { title: 'Trash', icon: 'delete-bin-line', empty: 'Trash is empty' }
-	};
+	const META = $derived<Record<MailboxView, { title: string; icon: string; empty: string }>>({
+		inbox: { title: t('nav.inbox'), icon: 'inbox-line', empty: t('mailbox.empty.inbox') },
+		archive: { title: t('nav.archive'), icon: 'archive-line', empty: t('mailbox.empty.archive') },
+		starred: { title: t('nav.starred'), icon: 'star-line', empty: t('mailbox.empty.starred') },
+		drafts: { title: t('nav.drafts'), icon: 'draft-line', empty: t('mailbox.empty.drafts') },
+		sent: { title: t('nav.sent'), icon: 'send-plane-line', empty: t('mailbox.empty.sent') },
+		trash: { title: t('nav.trash'), icon: 'delete-bin-line', empty: t('mailbox.empty.trash') }
+	});
 
 	const meta = $derived(META[view]);
+	const addresses = $derived(($currentPage.data.addresses ?? []) as MailAddress[]);
+
+	/** The identity a conversation arrived on — shown only when it disambiguates. */
+	function identity(thread: ThreadSummary): MailAddress | null {
+		if (addresses.length < 2) return null;
+		// Catch-all deliveries have no address_id on purpose; do not guess from domain.
+		return addresses.find((address) => address.id === thread.address_id) ?? null;
+	}
 
 	// Local copy so stars and reads can flip before the server round trip lands.
 	let items = $state<ThreadSummary[]>([]);
 	let selected = $state<string[]>([]);
 	let busy = $state(false);
+	let actionError = $state('');
 	let filterOpen = $state(false);
 	let moreOpen = $state(false);
 	let selectMenuOpen = $state(false);
+	let selecting = $state(false);
+	let hadSelection = $state(false);
+	let longPressTimer = 0;
+	let longPressFired = false;
+	let pressX = 0;
+	let pressY = 0;
 
 	$effect(() => {
-		items = mailbox.threads;
-		selected = [];
+		const next = mailbox.threads;
+		items = next;
+		const ids = new Set(next.map((thread) => thread.thread_id));
+		selected = untrack(() => selected).filter((id) => ids.has(id));
 	});
+
+	$effect(() => {
+		if (selected.length > 0) hadSelection = true;
+		if (hadSelection && selected.length === 0) {
+			selecting = false;
+			hadSelection = false;
+		}
+	});
+
+	const hideMailboxTitle = $derived(isPrimaryTab(`/${view}`));
 
 	const allSelected = $derived(items.length > 0 && selected.length === items.length);
 	const someSelected = $derived(selected.length > 0);
 	const activeFilterCount = $derived(
-		[filters.unreadOnly, filters.starredOnly, filters.attachmentsOnly].filter(Boolean).length
+		[filters.unreadOnly, filters.starredOnly, filters.attachmentsOnly, filters.addressId].filter(
+			Boolean
+		).length
 	);
 
 	/**
@@ -51,21 +93,27 @@
 	 * they name the recipient; everywhere else names the people in the thread.
 	 */
 	function people(thread: ThreadSummary): string {
-		if (view === 'drafts' || (view === 'sent' && thread.participants.every((p) => p.self))) {
-			return recipientOf(thread) || (view === 'drafts' ? 'No recipient' : 'Unknown');
+		if (view === 'drafts' || view === 'sent') {
+			return recipientOf(thread) || (view === 'drafts' ? t('mailbox.noRecipient') : t('common.unknown'));
 		}
 
-		return thread.participants.map((participant) => participant.label).join(', ');
+		return thread.participants
+			.filter((participant) => !participant.self)
+			.map((participant) => participant.label || participant.address)
+			.join(', ');
 	}
 
 	function recipientOf(thread: ThreadSummary): string {
-		const [first] = thread.participants;
-		return first?.address ? first.address.split('@')[0].replace(/[._-]+/g, ' ') : '';
+		return thread.participants
+			.filter((participant) => !participant.self)
+			.map((participant) => participant.label || participant.address)
+			.join(', ');
 	}
 
 	function initial(thread: ThreadSummary): string {
 		const external = thread.participants.find((participant) => !participant.self);
-		return ((external ?? thread.participants[0])?.address[0] ?? '?').toUpperCase();
+		const participant = external ?? thread.participants[0];
+		return (participant?.label || participant?.address || '?')[0].toUpperCase();
 	}
 
 	/** Rows carry the newest message; opening it opens the whole conversation. */
@@ -91,19 +139,71 @@
 	/** One entry point for every list action, so the UI always refreshes after. */
 	async function run(action: string, ids: string[] = selected) {
 		if (busy) return;
+		actionError = '';
 		busy = true;
 		try {
-			await fetch('/api/mail/actions', {
+			const response = await fetch('/api/mail/actions', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ action, ids })
 			});
+			if (!response.ok) {
+				actionError = t('mailbox.updateFailed');
+				return;
+			}
 			selected = [];
 			await invalidateAll();
+		} catch {
+			actionError = t('mailbox.updateNetwork');
 		} finally {
 			busy = false;
 			moreOpen = false;
 		}
+	}
+
+	function beginLongPress(thread: ThreadSummary, event: PointerEvent) {
+		longPressFired = false;
+		pressX = event.clientX;
+		pressY = event.clientY;
+		window.clearTimeout(longPressTimer);
+		longPressTimer = window.setTimeout(() => {
+			longPressFired = true;
+			selecting = true;
+			if (!selected.includes(thread.latest_id)) toggle(thread.latest_id);
+			haptic(16);
+		}, 420);
+	}
+
+	function cancelLongPress() {
+		window.clearTimeout(longPressTimer);
+	}
+
+	function moveLongPress(event: PointerEvent) {
+		if (Math.hypot(event.clientX - pressX, event.clientY - pressY) > 8) cancelLongPress();
+	}
+
+	function swipeLeftAction(thread: ThreadSummary) {
+		if (view === 'trash') return { icon: 'delete-bin-2-line', label: t('mailbox.delete'), tone: 'danger' as const };
+		return { icon: 'delete-bin-line', label: t('nav.trash'), tone: 'danger' as const };
+	}
+
+	function swipeRightAction(thread: ThreadSummary) {
+		if (view === 'trash') return { icon: 'arrow-go-back-line', label: t('mailbox.restore'), tone: 'good' as const };
+		return {
+			icon: thread.is_starred ? 'star-fill' : 'star-line',
+			label: thread.is_starred ? t('mailbox.unstar') : t('mailbox.star'),
+			tone: 'star' as const
+		};
+	}
+
+	function onSwipeLeft(thread: ThreadSummary) {
+		if (view === 'trash') void run('delete', [thread.latest_id]);
+		else void run('trash', [thread.latest_id]);
+	}
+
+	function onSwipeRight(thread: ThreadSummary) {
+		if (view === 'trash') void run('restore', [thread.latest_id]);
+		else void toggleStar(thread);
 	}
 
 	async function toggleStar(thread: ThreadSummary) {
@@ -147,22 +247,21 @@
 	const rangeEnd = $derived(Math.min(mailbox.page * mailbox.pageSize, mailbox.total));
 </script>
 
-<section class="mailbox">
+<PullToRefresh onRefresh={invalidateAll}>
+<section class="mailbox" data-view={view} class:selecting class:primary-tab={hideMailboxTitle}>
 	<header class="toolbar">
 		<div class="toolbar-left">
 			<div class="select-all">
-				<input
-					type="checkbox"
-					class="checkbox"
-					aria-label="Select all messages"
+				<Check
+					label={t('mailbox.selectAll')}
 					checked={allSelected}
 					indeterminate={someSelected && !allSelected}
-					onchange={(event) => selectAll(event.currentTarget.checked)}
+					onchange={selectAll}
 				/>
 				<button
 					type="button"
 					class="caret"
-					aria-label="Selection options"
+					aria-label={t('mailbox.selectionOptions')}
 					aria-expanded={selectMenuOpen}
 					onclick={() => (selectMenuOpen = !selectMenuOpen)}
 				>
@@ -173,37 +272,37 @@
 					<button
 						type="button"
 						class="backdrop"
-						aria-label="Close menu"
+						aria-label={t('mailbox.closeMenu')}
 						onclick={() => (selectMenuOpen = false)}
 					></button>
 					<div class="menu menu-left" role="menu">
 						<button type="button" class="menu-item" onclick={() => selectWhere(() => true)}>
-							All
+							{t('common.all')}
 						</button>
 						<button type="button" class="menu-item" onclick={() => selectWhere(() => false)}>
-							None
+							{t('common.none')}
 						</button>
 						<button type="button" class="menu-item" onclick={() => selectWhere((e) => !e.is_read)}>
-							Unread
+							{t('mailbox.unread')}
 						</button>
 						<button type="button" class="menu-item" onclick={() => selectWhere((e) => e.is_read)}>
-							Read
+							{t('mailbox.read')}
 						</button>
 						<button type="button" class="menu-item" onclick={() => selectWhere((e) => e.is_starred)}>
-							Starred
+							{t('nav.starred')}
 						</button>
 					</div>
 				{/if}
 			</div>
 
 			{#if someSelected}
-				<span class="selected-count">{selected.length} selected</span>
+				<span class="selected-count">{t('mailbox.selectedCount', { count: selected.length })}</span>
 
 				<div class="bulk-actions">
 					<button
 						type="button"
 						class="tool-btn"
-						title="Mark as read"
+						title={t('mailbox.markRead')}
 						disabled={busy}
 						onclick={() => run('read')}
 					>
@@ -212,7 +311,7 @@
 					<button
 						type="button"
 						class="tool-btn"
-						title="Mark as unread"
+						title={t('mailbox.markUnread')}
 						disabled={busy}
 						onclick={() => run('unread')}
 					>
@@ -221,7 +320,7 @@
 					<button
 						type="button"
 						class="tool-btn"
-						title="Star"
+						title={t('mailbox.star')}
 						disabled={busy}
 						onclick={() => run('star')}
 					>
@@ -230,18 +329,39 @@
 					<button
 						type="button"
 						class="tool-btn"
-						title="Remove star"
+						title={t('mailbox.removeStar')}
 						disabled={busy}
 						onclick={() => run('unstar')}
 					>
 						<Icon name="star-off-line" size={16} />
 					</button>
+					{#if view === 'archive'}
+						<button
+							type="button"
+							class="tool-btn"
+							title={t('mailbox.moveToInbox')}
+							disabled={busy}
+							onclick={() => run('unarchive')}
+						>
+							<Icon name="inbox-line" size={16} />
+						</button>
+					{:else if view !== 'drafts' && view !== 'trash'}
+						<button
+							type="button"
+							class="tool-btn"
+							title={t('nav.archive')}
+							disabled={busy}
+							onclick={() => run('archive')}
+						>
+							<Icon name="archive-line" size={16} />
+						</button>
+					{/if}
 
 					{#if view === 'trash'}
 						<button
 							type="button"
 							class="tool-btn"
-							title="Restore"
+							title={t('mailbox.restore')}
 							disabled={busy}
 							onclick={() => run('restore')}
 						>
@@ -250,7 +370,7 @@
 						<button
 							type="button"
 							class="tool-btn danger"
-							title="Delete permanently"
+							title={t('mailbox.deletePermanently')}
 							disabled={busy}
 							onclick={() => run('delete')}
 						>
@@ -260,7 +380,7 @@
 						<button
 							type="button"
 							class="tool-btn"
-							title="Move to trash"
+							title={t('mailbox.moveToTrash')}
 							disabled={busy}
 							onclick={() => run('trash')}
 						>
@@ -278,7 +398,7 @@
 					<button
 						type="button"
 						class="tool-btn"
-						aria-label="Mailbox actions"
+						aria-label={t('mailbox.mailboxActions')}
 						aria-expanded={moreOpen}
 						onclick={() => (moreOpen = !moreOpen)}
 					>
@@ -289,15 +409,107 @@
 						<button
 							type="button"
 							class="backdrop"
-							aria-label="Close menu"
+							aria-label={t('mailbox.closeMenu')}
 							onclick={() => (moreOpen = false)}
 						></button>
 						<div class="menu menu-left" role="menu">
+							{#if selecting}
+								<button
+									type="button"
+									class="menu-item"
+									onclick={() => {
+										selected = [];
+										selecting = false;
+										hadSelection = false;
+										moreOpen = false;
+									}}
+								>
+									<Icon name="close-line" size={15} /> {t('mailbox.cancelSelection')}
+								</button>
+							{:else}
+								<button
+									type="button"
+									class="menu-item"
+									onclick={() => {
+										selecting = true;
+										moreOpen = false;
+									}}
+								>
+									<Icon name="checkbox-multiple-line" size={15} /> {t('common.select')}
+								</button>
+							{/if}
+							{#if addresses.length > 1}
+								{#each addresses as address (address.id)}
+									<button
+										type="button"
+										class="menu-item"
+										onclick={() =>
+											apply({ address: filters.addressId === address.id ? null : address.id })}
+									>
+										<Icon
+											name={filters.addressId === address.id
+												? 'radio-button-line'
+												: 'checkbox-blank-circle-line'}
+											size={15}
+										/>
+										{address.label || address.address}
+									</button>
+								{/each}
+							{/if}
+							<button
+								type="button"
+								class="menu-item"
+								onclick={() => apply({ unread: filters.unreadOnly ? null : '1' })}
+							>
+								<Icon
+									name={filters.unreadOnly ? 'checkbox-fill' : 'checkbox-blank-line'}
+									size={15}
+								/>
+								{t('mailbox.unreadOnly')}
+							</button>
+							<button
+								type="button"
+								class="menu-item"
+								onclick={() => apply({ starred: filters.starredOnly ? null : '1' })}
+							>
+								<Icon
+									name={filters.starredOnly ? 'checkbox-fill' : 'checkbox-blank-line'}
+									size={15}
+								/>
+								{t('mailbox.starredOnly')}
+							</button>
+							<button
+								type="button"
+								class="menu-item"
+								onclick={() => apply({ attachments: filters.attachmentsOnly ? null : '1' })}
+							>
+								<Icon
+									name={filters.attachmentsOnly ? 'checkbox-fill' : 'checkbox-blank-line'}
+									size={15}
+								/>
+								{t('mailbox.hasAttachments')}
+							</button>
+							{#if activeFilterCount > 0 || filters.q}
+								<button
+									type="button"
+									class="menu-item"
+									onclick={() =>
+										apply({
+											unread: null,
+											starred: null,
+											attachments: null,
+											address: null,
+											q: null
+										})}
+								>
+									<Icon name="close-circle-line" size={15} /> {t('mailbox.clearFilters')}
+								</button>
+							{/if}
 							<button type="button" class="menu-item" onclick={() => run('read-all', [])}>
-								<Icon name="mail-open-line" size={15} /> Mark all as read
+								<Icon name="mail-open-line" size={15} /> {t('mailbox.markAllRead')}
 							</button>
 							<button type="button" class="menu-item" onclick={() => invalidateAll()}>
-								<Icon name="refresh-line" size={15} /> Refresh
+								<Icon name="refresh-line" size={15} /> {t('common.refresh')}
 							</button>
 							{#if view === 'trash'}
 								<button
@@ -305,7 +517,7 @@
 									class="menu-item danger"
 									onclick={() => run('empty-trash', [])}
 								>
-									<Icon name="delete-bin-2-line" size={15} /> Empty trash
+									<Icon name="delete-bin-2-line" size={15} /> {t('mailbox.emptyTrash')}
 								</button>
 							{/if}
 						</div>
@@ -317,11 +529,11 @@
 		<div class="toolbar-right">
 			<button
 				type="button"
-				class="pill"
+				class="pill unread-pill"
 				class:pill-on={filters.unreadOnly}
 				onclick={() => apply({ unread: filters.unreadOnly ? null : '1' })}
 			>
-				Unread
+				{t('mailbox.unread')}
 			</button>
 
 			<div class="filter">
@@ -329,11 +541,12 @@
 					type="button"
 					class="pill"
 					class:pill-on={activeFilterCount > 0}
+					aria-label={t('common.filter')}
 					aria-expanded={filterOpen}
 					onclick={() => (filterOpen = !filterOpen)}
 				>
 					<Icon name="equalizer-line" size={14} />
-					Filter
+					<span class="filter-label">{t('common.filter')}</span>
 					{#if activeFilterCount > 0}<span class="filter-count">{activeFilterCount}</span>{/if}
 				</button>
 
@@ -341,20 +554,38 @@
 					<button
 						type="button"
 						class="backdrop"
-						aria-label="Close filters"
+						aria-label={t('common.close')}
 						onclick={() => (filterOpen = false)}
 					></button>
 					<div class="menu menu-right" role="menu">
+						{#if addresses.length > 1}
+							{#each addresses as address (address.id)}
+								<button
+									type="button"
+									class="menu-item"
+									onclick={() =>
+										apply({ address: filters.addressId === address.id ? null : address.id })}
+								>
+									<Icon
+										name={filters.addressId === address.id
+											? 'radio-button-line'
+											: 'checkbox-blank-circle-line'}
+										size={15}
+									/>
+									{address.label || address.address}
+								</button>
+							{/each}
+						{/if}
 						<button
 							type="button"
 							class="menu-item"
 							onclick={() => apply({ unread: filters.unreadOnly ? null : '1' })}
 						>
 							<Icon
-								name={filters.unreadOnly ? 'checkbox-line' : 'checkbox-blank-line'}
+								name={filters.unreadOnly ? 'checkbox-fill' : 'checkbox-blank-line'}
 								size={15}
 							/>
-							Unread only
+							{t('mailbox.unreadOnly')}
 						</button>
 						<button
 							type="button"
@@ -362,10 +593,10 @@
 							onclick={() => apply({ starred: filters.starredOnly ? null : '1' })}
 						>
 							<Icon
-								name={filters.starredOnly ? 'checkbox-line' : 'checkbox-blank-line'}
+								name={filters.starredOnly ? 'checkbox-fill' : 'checkbox-blank-line'}
 								size={15}
 							/>
-							Starred only
+							{t('mailbox.starredOnly')}
 						</button>
 						<button
 							type="button"
@@ -373,31 +604,31 @@
 							onclick={() => apply({ attachments: filters.attachmentsOnly ? null : '1' })}
 						>
 							<Icon
-								name={filters.attachmentsOnly ? 'checkbox-line' : 'checkbox-blank-line'}
+								name={filters.attachmentsOnly ? 'checkbox-fill' : 'checkbox-blank-line'}
 								size={15}
 							/>
-							Has attachments
+							{t('mailbox.hasAttachments')}
 						</button>
 						{#if activeFilterCount > 0 || filters.q}
 							<button
 								type="button"
 								class="menu-item"
 								onclick={() =>
-									apply({ unread: null, starred: null, attachments: null, q: null })}
+									apply({ unread: null, starred: null, attachments: null, address: null, q: null })}
 							>
-								<Icon name="close-circle-line" size={15} /> Clear all
+								<Icon name="close-circle-line" size={15} /> {t('mailbox.clearAll')}
 							</button>
 						{/if}
 					</div>
 				{/if}
 			</div>
 
-			<div class="pager">
+			<div class="pager" class:pager-single={mailbox.pageCount <= 1}>
 				<a
 					class="pager-btn"
 					class:disabled={mailbox.page <= 1}
 					href={withParams({ page: mailbox.page - 1 })}
-					aria-label="Previous page"
+					aria-label={t('mailbox.previousPage')}
 				>
 					<Icon name="arrow-left-s-line" size={16} />
 				</a>
@@ -406,7 +637,7 @@
 					class="pager-btn"
 					class:disabled={mailbox.page >= mailbox.pageCount}
 					href={withParams({ page: mailbox.page + 1 })}
-					aria-label="Next page"
+					aria-label={t('mailbox.nextPage')}
 				>
 					<Icon name="arrow-right-s-line" size={16} />
 				</a>
@@ -414,11 +645,35 @@
 		</div>
 	</header>
 
+	{#if actionError}
+		<p class="action-error" role="alert">{actionError}</p>
+	{/if}
+
+	{#if activeFilterCount > 0}
+		<div class="filter-chips" aria-label={t('mailbox.activeFilters')}>
+			{#if filters.unreadOnly}
+				<a href={withParams({ unread: null })} class="filter-chip">{t('mailbox.unread')}</a>
+			{/if}
+			{#if filters.starredOnly}
+				<a href={withParams({ starred: null })} class="filter-chip">{t('nav.starred')}</a>
+			{/if}
+			{#if filters.attachmentsOnly}
+				<a href={withParams({ attachments: null })} class="filter-chip">{t('mailbox.attachments')}</a>
+			{/if}
+			{#if filters.addressId}
+				{@const filtered = addresses.find((address) => address.id === filters.addressId)}
+				<a href={withParams({ address: null })} class="filter-chip">
+					{filtered?.label || filtered?.address || t('mailbox.address')}
+				</a>
+			{/if}
+		</div>
+	{/if}
+
 	{#if filters.q}
 		<div class="search-note">
 			<Icon name="search-line" size={14} />
-			<span>{mailbox.total} result{mailbox.total === 1 ? '' : 's'} for “{filters.q}”</span>
-			<a href={withParams({ q: null })} class="search-clear">Clear</a>
+			<span>{plural($currentPage.data.locale, 'mailbox.searchResults', 'mailbox.searchResultsPlural', mailbox.total, { query: filters.q })}</span>
+			<a href={withParams({ q: null })} class="search-clear">{t('mailbox.clear')}</a>
 		</div>
 	{/if}
 
@@ -426,7 +681,7 @@
 		{#if items.length === 0}
 			<EmptyState
 				icon={filters.q ? 'search-line' : meta.icon}
-				title={filters.q ? 'No messages match that search' : meta.empty}
+				title={filters.q ? t('mailbox.empty.search') : meta.empty}
 			/>
 		{:else}
 			<ul>
@@ -436,10 +691,15 @@
 						class:unread={!thread.is_read}
 						class:checked={selected.includes(thread.latest_id)}
 					>
-						<input
-							type="checkbox"
-							class="checkbox"
-							aria-label="Select conversation with {people(thread)}"
+						<SwipeRow
+							disabled={selecting}
+							left={swipeRightAction(thread)}
+							right={swipeLeftAction(thread)}
+							onLeft={() => onSwipeRight(thread)}
+							onRight={() => onSwipeLeft(thread)}
+						>
+						<Check
+							label={t('mailbox.selectConversation', { people: people(thread) })}
 							checked={selected.includes(thread.latest_id)}
 							onchange={() => toggle(thread.latest_id)}
 						/>
@@ -448,13 +708,26 @@
 							type="button"
 							class="star"
 							class:on={thread.is_starred}
-							aria-label={thread.is_starred ? 'Remove star' : 'Add star'}
+							aria-label={thread.is_starred ? t('mailbox.removeStar') : t('mailbox.addStar')}
 							onclick={() => toggleStar(thread)}
 						>
 							<Icon name={thread.is_starred ? 'star-fill' : 'star-line'} size={15} />
 						</button>
 
-						<a class="row-link" href={href(thread)}>
+						<a
+							class="row-link"
+							href={href(thread)}
+							onclick={(event) => {
+								if (longPressFired || selecting) {
+									event.preventDefault();
+									if (selecting) toggle(thread.latest_id);
+								}
+							}}
+							onpointerdown={(event) => beginLongPress(thread, event)}
+							onpointerup={cancelLongPress}
+							onpointercancel={cancelLongPress}
+							onpointermove={moveLongPress}
+						>
 							<span class="avatar">{initial(thread)}</span>
 
 							<span class="sender" title={people(thread)}>
@@ -462,11 +735,14 @@
 								{#if thread.message_count > 1}
 									<span class="count">{thread.message_count}</span>
 								{/if}
-								{#if thread.is_draft}<span class="tag tag-draft">Draft</span>{/if}
+								{#if thread.is_draft}<span class="tag tag-draft">{t('mailbox.draftTag')}</span>{/if}
+								{#if identity(thread)}
+									<span class="tag">{identity(thread)?.label || identity(thread)?.address}</span>
+								{/if}
 							</span>
 
 							<span class="body">
-								<span class="subject">{thread.subject || '(no subject)'}</span>
+								<span class="subject">{thread.subject || t('mailbox.noSubject')}</span>
 								{#if thread.preview}
 									<span class="preview">— {thread.preview}</span>
 								{/if}
@@ -481,7 +757,7 @@
 								{/if}
 							</span>
 
-							<span class="date">{formatRelativeDate(thread.created_at)}</span>
+							<span class="date">{formatRelativeDate(thread.created_at, $currentPage.data.locale)}</span>
 						</a>
 
 						<span class="row-actions">
@@ -489,7 +765,7 @@
 								<button
 									type="button"
 									class="tool-btn"
-									title="Restore"
+									title={t('mailbox.restore')}
 									onclick={() => run('restore', [thread.latest_id])}
 								>
 									<Icon name="arrow-go-back-line" size={15} />
@@ -497,7 +773,7 @@
 								<button
 									type="button"
 									class="tool-btn danger"
-									title="Delete permanently"
+									title={t('mailbox.deletePermanently')}
 									onclick={() => run('delete', [thread.latest_id])}
 								>
 									<Icon name="delete-bin-2-line" size={15} />
@@ -506,21 +782,41 @@
 								<button
 									type="button"
 									class="tool-btn"
-									title={thread.is_read ? 'Mark as unread' : 'Mark as read'}
+									title={thread.is_read ? t('mailbox.markUnread') : t('mailbox.markRead')}
 									onclick={() => run(thread.is_read ? 'unread' : 'read', [thread.latest_id])}
 								>
 									<Icon name={thread.is_read ? 'mail-line' : 'mail-open-line'} size={15} />
 								</button>
+								{#if view === 'archive'}
+									<button
+										type="button"
+										class="tool-btn"
+										title={t('mailbox.moveToInbox')}
+										onclick={() => run('unarchive', [thread.latest_id])}
+									>
+										<Icon name="inbox-line" size={15} />
+									</button>
+								{:else if view !== 'drafts'}
+									<button
+										type="button"
+										class="tool-btn"
+										title={t('nav.archive')}
+										onclick={() => run('archive', [thread.latest_id])}
+									>
+										<Icon name="archive-line" size={15} />
+									</button>
+								{/if}
 								<button
 									type="button"
 									class="tool-btn"
-									title="Move to trash"
+									title={t('mailbox.moveToTrash')}
 									onclick={() => run('trash', [thread.latest_id])}
 								>
 									<Icon name="delete-bin-line" size={15} />
 								</button>
 							{/if}
 						</span>
+						</SwipeRow>
 					</li>
 				{/each}
 			</ul>
@@ -533,15 +829,21 @@
 		</footer>
 	{/if}
 </section>
+</PullToRefresh>
 
 <style>
 	.mailbox {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		background: var(--color-surface);
 		border-radius: 1rem;
 		box-shadow: var(--shadow-sm);
 		overflow: hidden;
+	}
+
+	.filter-chips {
+		display: none;
 	}
 
 	/* --- toolbar --- */
@@ -579,6 +881,12 @@
 		font-weight: 500;
 	}
 
+	.action-error {
+		margin: 0.75rem 0.875rem 0;
+		font-size: 0.875rem;
+		color: var(--color-danger);
+	}
+
 	.bulk-actions {
 		display: flex;
 		align-items: center;
@@ -602,15 +910,6 @@
 
 	.caret:hover {
 		color: var(--color-text);
-	}
-
-	.checkbox {
-		width: 1rem;
-		height: 1rem;
-		flex-shrink: 0;
-		border-radius: 0.25rem;
-		accent-color: var(--color-accent);
-		cursor: pointer;
 	}
 
 	.tool-btn {
@@ -792,11 +1091,6 @@
 	/* Read rows sit back a shade; unread ones stay bright and bold. */
 	.row {
 		position: relative;
-		display: grid;
-		grid-template-columns: auto auto 1fr;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0 0.875rem;
 		background: var(--color-bg);
 		box-shadow: inset 0 -1px 0 var(--color-line);
 		transition: background 0.12s;
@@ -806,17 +1100,26 @@
 		box-shadow: none;
 	}
 
-	.row.unread {
+	.row :global(.swipe-content) {
+		display: grid;
+		grid-template-columns: auto auto 1fr;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0 0.875rem;
+		background: var(--color-bg);
+	}
+
+	.row.unread :global(.swipe-content) {
 		background: var(--color-surface);
 	}
 
-	.row:hover,
-	.row.unread:hover {
+	.row:hover :global(.swipe-content),
+	.row.unread:hover :global(.swipe-content) {
 		background: var(--color-surface-muted);
 	}
 
-	.row.checked,
-	.row.checked:hover {
+	.row.checked :global(.swipe-content),
+	.row.checked:hover :global(.swipe-content) {
 		background: var(--color-accent-soft);
 	}
 
@@ -875,7 +1178,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		text-transform: capitalize;
 	}
 
 	.row.unread .sender {
@@ -992,22 +1294,183 @@
 		box-shadow: inset 0 1px 0 var(--color-line);
 	}
 
-	@media (max-width: 780px) {
-		.row-link {
-			grid-template-columns: minmax(0, 1fr) auto;
-			grid-template-areas:
-				'sender date'
-				'body body';
-			gap: 0.25rem 0.5rem;
+	@media (max-width: 900px) {
+		.mailbox {
+			flex: 1;
+			border-radius: 0;
+			box-shadow: none;
+			min-height: 100%;
+			background: var(--color-bg);
 		}
 
-		.avatar,
+		.toolbar {
+			position: sticky;
+			top: 0;
+			z-index: 8;
+			flex-wrap: wrap;
+			padding: 0.5rem 0.75rem;
+			background: var(--color-surface);
+		}
+
+		.mailbox:not(.selecting) .toolbar-right {
+			display: none;
+		}
+
+		.mailbox.primary-tab:not(.selecting) .toolbar {
+			justify-content: flex-end;
+			padding: 0.25rem 0.5rem;
+			background: var(--color-bg);
+			box-shadow: none;
+		}
+
+		.mailbox.primary-tab:not(.selecting) .toolbar-left {
+			margin-left: auto;
+		}
+
+		.mailbox.primary-tab:not(.selecting) .title,
+		.mailbox.primary-tab:not(.selecting) .total {
+			display: none;
+		}
+
+		.filter-chips {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 0.5rem;
+			padding: 0.5rem 1rem;
+		}
+
+		.filter-chip {
+			display: inline-flex;
+			align-items: center;
+			min-height: 2rem;
+			padding: 0 0.75rem;
+			border-radius: 9999px;
+			font-size: 0.8125rem;
+			font-weight: 500;
+			color: var(--color-accent-text);
+			background: var(--color-accent-soft);
+		}
+
+		.backdrop {
+			background: var(--color-scrim);
+			animation: sheet-fade 180ms ease-out;
+		}
+
+		.menu {
+			position: fixed;
+			top: auto;
+			right: 0;
+			bottom: 0;
+			left: 0;
+			min-width: 0;
+			padding: 0.5rem 1rem calc(1rem + env(safe-area-inset-bottom));
+			border-radius: 1.25rem 1.25rem 0 0;
+			animation: sheet-up 220ms cubic-bezier(0.32, 0.72, 0, 1);
+		}
+
+		.menu-left,
+		.menu-right {
+			left: 0;
+			right: 0;
+		}
+
+		@keyframes sheet-up {
+			from {
+				transform: translateY(16%);
+			}
+		}
+
+		@keyframes sheet-fade {
+			from {
+				opacity: 0;
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.menu,
+			.backdrop {
+				animation: none;
+			}
+		}
+
+		.unread-pill {
+			display: none;
+		}
+
+		.filter-label {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0, 0, 0, 0);
+		}
+
+		.filter .pill {
+			position: relative;
+			width: var(--touch-target);
+			padding: 0;
+			justify-content: center;
+		}
+
+		.mailbox:not(.selecting) .select-all {
+			display: none;
+		}
+
+		.tool-btn,
+		.pager-btn,
+		.caret {
+			width: var(--touch-target);
+			height: var(--touch-target);
+		}
+
+		.pill {
+			height: 2.25rem;
+			padding: 0 0.875rem;
+		}
+
+		.row :global(.swipe-content) {
+			grid-template-columns: auto 1fr;
+			gap: 0.625rem;
+			padding: 0.25rem 1rem;
+			min-height: 4.5rem;
+		}
+
+		.mailbox:not(.selecting) .row :global(.swipe-content) {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.mailbox:not(.selecting) .row :global(.check) {
+			display: none;
+		}
+
+		.star {
+			display: none;
+		}
+
+		.row-link {
+			grid-template-columns: 2.5rem minmax(0, 1fr) auto;
+			grid-template-areas:
+				'avatar sender date'
+				'avatar body body';
+			gap: 0.15rem 0.75rem;
+			padding: 0.75rem 0;
+		}
+
+		.avatar {
+			grid-area: avatar;
+			align-self: center;
+			width: 2.5rem;
+			height: 2.5rem;
+			font-size: 0.8125rem;
+		}
+
 		.indicators {
 			display: none;
 		}
 
 		.sender {
 			grid-area: sender;
+			font-size: 0.9375rem;
 		}
 
 		.date {
@@ -1023,6 +1486,20 @@
 		}
 
 		.title {
+			font-size: 1.0625rem;
+		}
+
+		.list-foot {
+			display: none;
+		}
+
+		.pager-single {
+			display: none;
+		}
+
+		.menu-item {
+			min-height: var(--touch-target);
+			padding: 0.75rem 0.875rem;
 			font-size: 0.9375rem;
 		}
 	}

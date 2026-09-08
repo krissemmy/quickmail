@@ -1,6 +1,7 @@
 export type ThemePreference = 'light' | 'dark' | 'system';
 
-export const THEME_STORAGE_KEY = 'mail:theme';
+export const THEME_STORAGE_KEY = 'quickinbox:theme';
+const LEGACY_THEME_STORAGE_KEY = 'mail:theme';
 
 export const THEME_OPTIONS: { value: ThemePreference; label: string; icon: string }[] = [
 	{ value: 'light', label: 'Light', icon: 'sun-line' },
@@ -13,13 +14,34 @@ function isPreference(value: string | null): value is ThemePreference {
 }
 
 export function readThemePreference(): ThemePreference {
-	const stored = localStorage.getItem(THEME_STORAGE_KEY);
+	const stored =
+		localStorage.getItem(THEME_STORAGE_KEY) ?? localStorage.getItem(LEGACY_THEME_STORAGE_KEY);
 	return isPreference(stored) ? stored : 'system';
 }
+
+export const THEME_COLOR = {
+	light: '#ffffff',
+	dark: '#17171a'
+} as const;
 
 export function resolveTheme(preference: ThemePreference): 'light' | 'dark' {
 	if (preference !== 'system') return preference;
 	return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function syncThemeColor(theme: 'light' | 'dark'): void {
+	const color = THEME_COLOR[theme];
+	const metas = document.querySelectorAll('meta[name="theme-color"]');
+	if (metas.length === 0) {
+		const meta = document.createElement('meta');
+		meta.name = 'theme-color';
+		meta.content = color;
+		document.head.appendChild(meta);
+		return;
+	}
+	for (const meta of metas) {
+		meta.setAttribute('content', color);
+	}
 }
 
 /**
@@ -27,7 +49,9 @@ export function resolveTheme(preference: ThemePreference): 'light' | 'dark' {
  * script in app.html so the first paint is already correct.
  */
 export function applyTheme(preference: ThemePreference): void {
-	document.documentElement.dataset.theme = resolveTheme(preference);
+	const theme = resolveTheme(preference);
+	document.documentElement.dataset.theme = theme;
+	syncThemeColor(theme);
 }
 
 export function setThemePreference(preference: ThemePreference): void {

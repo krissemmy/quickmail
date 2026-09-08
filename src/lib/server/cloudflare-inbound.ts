@@ -1,10 +1,11 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type { R2Bucket } from '@cloudflare/workers-types';
 import PostalMime, { type Address, type Attachment } from 'postal-mime';
 import { insertAttachmentBytes } from './attachments';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_EMAIL } from './constants';
 import { recordUnroutedEmail, resolveInboundRoute } from './domains';
 import { collectInboundRecipients, parseEmailAddress } from './email-address';
 import { emailExistsByProviderId, insertEmail } from './mail-store';
+import { scheduleNewMailNotification, type PushNotificationEnv } from './push-notifications';
 import { normalizeMessageId } from './send-mail';
 
 export type CloudflareInboundMessage = {
@@ -15,8 +16,7 @@ export type CloudflareInboundMessage = {
 	setReject(reason: string): void;
 };
 
-export type CloudflareInboundEnv = {
-	DB: D1Database;
+export type CloudflareInboundEnv = PushNotificationEnv & {
 	ATTACHMENTS: R2Bucket;
 };
 
@@ -39,7 +39,8 @@ export async function handleCloudflareInbound(
 		bcc: mailboxAddresses(parsed.bcc)
 	});
 
-	const from = parseEmailAddress(message.from || mailboxAddresses(parsed.from)[0] || '');
+	const sender = firstMailboxIdentity(parsed.from);
+	const from = inboundSender(sender?.address, message.from);
 	const subject = parsed.subject?.trim() || message.headers.get('subject')?.trim() || '(no subject)';
 	const messageId =
 		normalizeMessageId(parsed.messageId ?? message.headers.get('message-id')) ?? null;
@@ -74,6 +75,7 @@ export async function handleCloudflareInbound(
 		userId: route.userId,
 		direction: 'inbound',
 		from,
+		fromName: sender?.name,
 		to: route.address,
 		cc: mailboxAddresses(parsed.cc).join(', ') || null,
 		subject,
@@ -83,10 +85,17 @@ export async function handleCloudflareInbound(
 		inReplyTo,
 		references,
 		domainId: route.domainId,
+		addressId: route.addressId,
 		providerId
 	});
 
 	await storeInboundAttachments(env, emailId, parsed.attachments);
+	await scheduleNewMailNotification(env, {
+		emailId,
+		userId: route.userId,
+		from: sender?.name || from,
+		subject
+	});
 }
 
 async function storeInboundAttachments(
@@ -112,6 +121,30 @@ async function storeInboundAttachments(
 	}
 }
 
+/**
+ * Who the mail is *from*, for display, replies and search.
+ *
+ * `message.from` is the envelope sender — SMTP `MAIL FROM` — which providers
+ * routinely point at a bounce mailbox rather than the author. Cloudflare Email
+ * Sending uses `bounces@cf-bounce.<domain>`, and VERP senders behave the same
+ * way, so preferring the envelope attributes mail to the bounce address and
+ * sends replies there. The `From:` header carries the author, so it wins; the
+ * envelope is only a fallback for mail that arrives without a usable header.
+ */
+export function inboundSender(
+	headerFrom: string | undefined,
+	envelopeFrom: string | undefined
+): string {
+	// Choose on whether the header actually yielded an address, not on whether it
+	// was present: a blank or malformed `From:` is still a truthy string, and
+	// picking it on that alone would skip the fallback entirely.
+	const header = parseEmailAddress(headerFrom ?? '');
+	if (header.includes('@')) return header;
+
+	const envelope = parseEmailAddress(envelopeFrom ?? '');
+	return envelope || header;
+}
+
 function mailboxAddresses(value: Address | Address[] | undefined): string[] {
 	if (!value) return [];
 	const list = Array.isArray(value) ? value : [value];
@@ -127,6 +160,29 @@ function mailboxAddresses(value: Address | Address[] | undefined): string[] {
 	}
 
 	return addresses;
+}
+
+function firstMailboxIdentity(
+	value: Address | Address[] | undefined
+): { name: string | null; address: string } | null {
+	if (!value) return null;
+	const list = Array.isArray(value) ? value : [value];
+
+	for (const item of list) {
+		if (item.address) return { name: item.name?.trim() || null, address: parseEmailAddress(item.address) };
+		if (item.group) {
+			for (const member of item.group) {
+				if (member.address) {
+					return {
+						name: member.name?.trim() || null,
+						address: parseEmailAddress(member.address)
+					};
+				}
+			}
+		}
+	}
+
+	return null;
 }
 
 function attachmentBytes(content: Attachment['content']): Uint8Array | null {

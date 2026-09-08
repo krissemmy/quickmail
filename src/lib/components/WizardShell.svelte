@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { EmailProviderKind } from '$lib/types';
+	import { t } from '$lib/i18n';
 	import Logo from './Logo.svelte';
 	import PartnerLink from './PartnerLink.svelte';
 
@@ -8,7 +9,7 @@
 		subtitle,
 		steps = [],
 		current = 1,
-		/** Show Mail ↔ provider marks above the title (domain connect screens). */
+		/** Show Quickinbox ↔ provider marks above the title (domain connect screens). */
 		partner = false,
 		partnerCaption = 'Connected via Cloudflare Email',
 		partnerKind = 'cloudflare',
@@ -39,7 +40,7 @@
 		{/if}
 
 		{#if steps.length > 1}
-			<ol class="steps" aria-label="Setup progress">
+			<ol class="steps" aria-label={t('wizard.progress')}>
 				{#each steps as label, index (label)}
 					<li class:active={current === index + 1} class:done={current > index + 1}>
 						<span class="step-dot">{current > index + 1 ? '✓' : index + 1}</span>
@@ -58,7 +59,8 @@
 		width: 100%;
 		max-width: 32rem;
 		margin: 0 auto;
-		padding: 3rem 1rem 4rem;
+		padding: max(3rem, calc(2rem + env(safe-area-inset-top))) max(1rem, env(safe-area-inset-right))
+			max(4rem, calc(2rem + env(safe-area-inset-bottom))) max(1rem, env(safe-area-inset-left));
 	}
 
 	.wizard-head {
@@ -72,6 +74,7 @@
 	.brand-icon {
 		display: flex;
 		margin-bottom: 1rem;
+		overflow: hidden;
 		/* Matches the mark's own corner radius so the shadow hugs the tile. */
 		border-radius: 0.775rem;
 		box-shadow: var(--shadow-sm);

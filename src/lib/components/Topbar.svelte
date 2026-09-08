@@ -1,20 +1,21 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { haptic } from '$lib/app-chrome';
+	import { t } from '$lib/i18n';
 	import Icon from './Icon.svelte';
+	import LocaleSwitcher from './LocaleSwitcher.svelte';
 	import type { MailAddress } from '$lib/types';
 
 	let {
 		userName,
 		userEmail,
 		addresses,
-		onToggleNav,
 		onLogout
 	}: {
 		userName: string;
 		userEmail: string;
 		addresses: MailAddress[];
-		onToggleNav: () => void;
 		onLogout: () => void;
 	} = $props();
 
@@ -60,30 +61,29 @@
 </script>
 
 <header class="topbar">
-	<button type="button" class="nav-toggle" aria-label="Open navigation" onclick={onToggleNav}>
-		<Icon name="menu-line" size={18} />
-	</button>
-
 	<form class="search" onsubmit={submitSearch} role="search">
 		<Icon name="search-line" size={16} />
 		<input
 			type="search"
 			bind:value={query}
-			placeholder="Search messages"
-			aria-label="Search messages"
+			placeholder={t('mailbox.searchMessages')}
+			aria-label={t('mailbox.searchMessages')}
 		/>
 		{#if query}
-			<button type="button" class="search-clear" aria-label="Clear search" onclick={clearSearch}>
+			<button type="button" class="search-clear" aria-label={t('mailbox.clearSearch')} onclick={clearSearch}>
 				<Icon name="close-line" size={15} />
 			</button>
 		{/if}
 	</form>
 
 	<div class="topbar-actions">
+		<div class="locale-chip">
+			<LocaleSwitcher />
+		</div>
 		<a
 			href="/settings"
 			class="icon-btn"
-			aria-label="Settings"
+			aria-label={t('nav.settings')}
 			class:active={$page.url.pathname === '/settings'}
 		>
 			<Icon name="settings-3-line" size={17} />
@@ -95,7 +95,10 @@
 				class="account-trigger"
 				aria-haspopup="menu"
 				aria-expanded={menuOpen}
-				onclick={() => (menuOpen = !menuOpen)}
+				onclick={() => {
+					haptic(8);
+					menuOpen = !menuOpen;
+				}}
 			>
 				<span class="account-text">
 					<span class="account-name">{userName}</span>
@@ -108,7 +111,7 @@
 				<button
 					type="button"
 					class="menu-backdrop"
-					aria-label="Close account menu"
+					aria-label={t('account.menu')}
 					onclick={() => (menuOpen = false)}
 				></button>
 				<div class="menu" role="menu">
@@ -117,10 +120,10 @@
 						<span class="menu-address">{primaryAddress}</span>
 					</p>
 					<a href="/settings" class="menu-item" role="menuitem" onclick={() => (menuOpen = false)}>
-						<Icon name="user-settings-line" size={15} /> Settings
+						<Icon name="user-settings-line" size={15} /> {t('nav.settings')}
 					</a>
 					<button type="button" class="menu-item" role="menuitem" onclick={onLogout}>
-						<Icon name="logout-box-r-line" size={15} /> Log out
+						<Icon name="logout-box-r-line" size={15} /> {t('nav.logOut')}
 					</button>
 				</div>
 			{/if}
@@ -140,16 +143,6 @@
 		padding: 0 1.25rem;
 		background: var(--color-surface);
 		box-shadow: inset 0 -1px 0 var(--color-line);
-	}
-
-	.nav-toggle {
-		display: none;
-		align-items: center;
-		justify-content: center;
-		width: 2rem;
-		height: 2rem;
-		border-radius: 0.5rem;
-		color: var(--color-text-secondary);
 	}
 
 	.search {
@@ -204,6 +197,19 @@
 		align-items: center;
 		gap: 0.5rem;
 		margin-left: auto;
+	}
+
+	.locale-chip {
+		display: flex;
+		align-items: center;
+	}
+
+	.locale-chip :global(.locale-trigger) {
+		width: 2rem;
+		height: 2rem;
+		min-width: 2rem;
+		border-radius: 0.5rem;
+		font-size: 0.6875rem;
 	}
 
 	:global(.topbar .icon-btn.active) {
@@ -320,7 +326,7 @@
 		color: var(--color-text);
 	}
 
-	@media (min-width: 640px) {
+	@media (min-width: 901px) {
 		.account-text {
 			display: flex;
 		}
@@ -328,11 +334,83 @@
 
 	@media (max-width: 900px) {
 		.topbar {
-			padding: 0 0.875rem;
+			height: calc(var(--topbar-height) + env(safe-area-inset-top));
+			padding: env(safe-area-inset-top) 0.75rem 0;
+			gap: 0.5rem;
 		}
 
-		.nav-toggle {
-			display: flex;
+		.search {
+			height: 2.75rem;
+			max-width: none;
+			border-radius: 9999px;
+		}
+
+		.search input {
+			font-size: 16px;
+		}
+
+		:global(.topbar .icon-btn) {
+			display: none;
+		}
+
+		.account-trigger {
+			width: var(--touch-target);
+			height: var(--touch-target);
+			padding: 0;
+			justify-content: center;
+		}
+
+		.avatar {
+			width: 2.25rem;
+			height: 2.25rem;
+		}
+
+		.menu-backdrop {
+			background: var(--color-scrim);
+			animation: sheet-fade 180ms ease-out;
+		}
+
+		.menu {
+			position: fixed;
+			top: auto;
+			right: 0;
+			bottom: 0;
+			left: 0;
+			min-width: 0;
+			padding: 0.5rem 1rem calc(1rem + env(safe-area-inset-bottom));
+			border-radius: 1.25rem 1.25rem 0 0;
+			animation: sheet-up 220ms cubic-bezier(0.32, 0.72, 0, 1);
+		}
+
+		.menu-item {
+			min-height: var(--touch-target);
+			font-size: 0.9375rem;
+		}
+
+		@keyframes sheet-up {
+			from {
+				transform: translateY(16%);
+			}
+		}
+
+		@keyframes sheet-fade {
+			from {
+				opacity: 0;
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.menu,
+			.menu-backdrop {
+				animation: none;
+			}
+		}
+	}
+
+	@media (max-width: 900px) {
+		:global(.app-shell[data-stacked='true'] .topbar),
+		:global(.app-shell[data-utility='true'] .topbar) {
+			display: none;
 		}
 	}
 </style>

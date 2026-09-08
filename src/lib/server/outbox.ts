@@ -1,9 +1,19 @@
 import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import type { MailAddress, OutboundAttachmentInput, User } from '$lib/types';
-import { appendEmailSignature } from '$lib/email-signature';
+import { appendEmailSignature, pickEmailSignature } from '$lib/email-signature';
 import { base64ByteLength, insertAttachments } from './attachments';
-import { MAX_TOTAL_ATTACHMENT_BYTES } from './constants';
-import { getAddressForUser, getDefaultAddress } from './domains';
+import {
+	MAX_ATTACHMENT_BYTES,
+	MAX_ATTACHMENTS_PER_EMAIL,
+	MAX_TOTAL_ATTACHMENT_BYTES
+} from './constants';
+import {
+	getAddressForUser,
+	getDefaultAddress,
+	getDomainByName,
+	listAddressesForUser
+} from './domains';
+import { parseEmailAddress } from './email-address';
 import { getEmailSignature } from './email-signature';
 import { stripHtml } from './html';
 import { insertEmail } from './mail-store';
@@ -12,6 +22,8 @@ import { escapeHtml, parseRecipients, sendOutboundEmail } from './send-mail';
 
 export type ComposeInput = {
 	fromAddressId?: string | null;
+	/** Pre-resolved identity — used by replies so we can send from the received mailbox. */
+	fromAddress?: MailAddress | null;
 	to: string;
 	cc?: string | null;
 	bcc?: string | null;
@@ -22,7 +34,39 @@ export type ComposeInput = {
 	references?: string | null;
 	replyToEmailId?: string | null;
 	attachments?: OutboundAttachmentInput[];
+	/** Forward-all can legitimately combine the per-message attachment sets. */
+	allowCombinedAttachments?: boolean;
+	/** Disable subject fallback for messages that intentionally start a thread. */
+	subjectMatch?: boolean;
 };
+
+export function assertTotalAttachmentBytes(totalBytes: number): void {
+	if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+		throw new Error('Attachments exceed the total size limit');
+	}
+}
+
+/** Reject attachment sets before provider delivery or Sent-folder persistence. */
+export function assertOutboundAttachments(
+	attachments: OutboundAttachmentInput[],
+	allowCombinedAttachments = false
+): void {
+	if (!allowCombinedAttachments && attachments.length > MAX_ATTACHMENTS_PER_EMAIL) {
+		throw new Error(`Maximum ${MAX_ATTACHMENTS_PER_EMAIL} attachments allowed`);
+	}
+
+	for (const attachment of attachments) {
+		const bytes = base64ByteLength(attachment.content);
+		if (bytes > MAX_ATTACHMENT_BYTES) {
+			const limitMb = MAX_ATTACHMENT_BYTES / (1024 * 1024);
+			throw new Error(`"${attachment.filename}" exceeds ${limitMb}MB limit`);
+		}
+	}
+
+	assertTotalAttachmentBytes(
+		attachments.reduce((sum, attachment) => sum + base64ByteLength(attachment.content), 0)
+	);
+}
 
 /**
  * Pick the identity a message is sent from: the one the composer chose, or the
@@ -44,6 +88,51 @@ export async function resolveFromAddress(
 	return address;
 }
 
+/**
+ * Replies come from the mailbox that received the original, not the default
+ * sending identity. Catch-all mail uses that exact recipient if the user owns
+ * the domain, even when the local-part is not a saved address.
+ *
+ * Returns null when the user has no sending identity, so the thread page can
+ * still load.
+ */
+export async function resolveReplyFromAddress(
+	db: D1Database,
+	user: User,
+	original: { direction: 'inbound' | 'outbound'; to_addr: string; from_addr: string }
+): Promise<MailAddress | null> {
+	const mailbox = parseEmailAddress(
+		original.direction === 'inbound' ? original.to_addr : original.from_addr
+	);
+
+	const owned = await listAddressesForUser(db, user.id);
+	const exact = owned.find((address) => address.address.toLowerCase() === mailbox);
+	if (exact) return exact;
+
+	const domainName = mailbox.split('@')[1];
+	const domain = domainName ? await getDomainByName(db, domainName) : null;
+	const canSendOnDomain =
+		domain &&
+		(domain.catchall_user_id === user.id ||
+			owned.some((address) => address.domain_id === domain.id));
+
+	if (domain && canSendOnDomain && mailbox.includes('@')) {
+		return {
+			id: `reply:${mailbox}`,
+			user_id: user.id,
+			domain_id: domain.id,
+			domain_name: domain.name,
+			address: mailbox,
+			label: null,
+			signature: null,
+			is_default: false,
+			created_at: new Date().toISOString()
+		};
+	}
+
+	return getDefaultAddress(db, user.id);
+}
+
 /** Send through the configured provider, then record it in the Sent folder. */
 export async function sendAndStore(
 	env: { DB: D1Database; ATTACHMENTS: R2Bucket },
@@ -52,7 +141,7 @@ export async function sendAndStore(
 	input: ComposeInput
 ): Promise<{ emailId: string; providerId: string; from: MailAddress }> {
 	// resolveFromAddress scopes the lookup to this user, so ownership is implied.
-	const from = await resolveFromAddress(env.DB, user, input.fromAddressId);
+	const from = input.fromAddress ?? (await resolveFromAddress(env.DB, user, input.fromAddressId));
 
 	const bodyHtml = input.html?.trim() || null;
 	const bodyText = input.text?.trim() || (bodyHtml ? stripHtml(bodyHtml) : '');
@@ -65,21 +154,15 @@ export async function sendAndStore(
 	const { text, html } = appendEmailSignature({
 		text: bodyText,
 		html: bodyHtml,
-		signature: await getEmailSignature(env.DB, user.id)
+		signature: pickEmailSignature(from.signature, await getEmailSignature(env.DB, user.id))
 	});
 
 	const attachments = input.attachments ?? [];
-	const totalBytes = attachments.reduce(
-		(sum, file) => sum + base64ByteLength(file.content),
-		0
-	);
-	if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-		throw new Error('Attachments exceed the total size limit');
-	}
+	assertOutboundAttachments(attachments, input.allowCombinedAttachments);
 
 	const { providerId } = await sendOutboundEmail(provider, {
 		from,
-		senderName: user.name,
+		senderName: from.label?.trim() || user.name,
 		to: input.to,
 		cc: input.cc ?? undefined,
 		bcc: input.bcc ?? undefined,
@@ -95,6 +178,7 @@ export async function sendAndStore(
 		userId: user.id,
 		direction: 'outbound',
 		from: from.address,
+		fromName: from.label?.trim() || user.name,
 		to: parseRecipients(input.to).join(', '),
 		cc: parseRecipients(input.cc).join(', ') || null,
 		bcc: parseRecipients(input.bcc).join(', ') || null,
@@ -105,13 +189,17 @@ export async function sendAndStore(
 		references: input.references ?? null,
 		replyToEmailId: input.replyToEmailId ?? null,
 		domainId: from.domain_id,
+		addressId: from.id,
 		providerId,
 		status: initialOutboundStatus(provider.kind),
-		isRead: true
+		isRead: true,
+		subjectMatch: input.subjectMatch
 	});
 
 	if (attachments.length > 0) {
-		await insertAttachments(env.DB, env.ATTACHMENTS, emailId, attachments);
+		await insertAttachments(env.DB, env.ATTACHMENTS, emailId, attachments, {
+			enforceCountLimit: !input.allowCombinedAttachments
+		});
 	}
 
 	return { emailId, providerId, from };

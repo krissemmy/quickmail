@@ -3,7 +3,7 @@
 	"name": "quickmail",
 	"main": ".svelte-kit/cloudflare/_worker.js",
 	"compatibility_date": "2025-06-01",
-	"compatibility_flags": ["nodejs_compat"],
+	"compatibility_flags": ["nodejs_compat", "enable_nodejs_http_modules"],
 	"workers_dev": true,
 
 	// Your Cloudflare account is picked up from `wrangler login`. If you belong
@@ -26,6 +26,7 @@
 		"binding": "ASSETS"
 	},
 
+	// Prefer `bun run setup` (or `bash scripts/setup.sh`) over editing this by hand.
 	// Mail provider is selected by EMAIL_PROVIDER (resend | cloudflare).
 	// Resend secrets (when EMAIL_PROVIDER=resend or unset):
 	//   wrangler secret put RESEND_API_KEY
@@ -34,8 +35,10 @@
 	// Locally, put values in .dev.vars (copy .dev.vars.example).
 
 	"vars": {
-		"EMAIL_PROVIDER": "resend"
-		// "CLOUDFLARE_MAIL_DOMAINS": "example.com"
+		"EMAIL_PROVIDER": "resend",
+		// Dashboard form requires a non-empty value. Keep example.com for
+		// Resend; replace with your domain when EMAIL_PROVIDER=cloudflare.
+		"CLOUDFLARE_MAIL_DOMAINS": "example.com"
 	},
 
 	"send_email": [
@@ -49,7 +52,7 @@
 		{
 			"binding": "DB",
 			"database_name": "quickmail",
-			// Run `wrangler d1 create quickmail` and paste the id it prints here.
+			// `bun run setup` fills this in, or: wrangler d1 create <name>
 			"database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
 			"migrations_dir": "migrations"
 		}
@@ -58,7 +61,7 @@
 	"r2_buckets": [
 		{
 			"binding": "ATTACHMENTS",
-			// Run `wrangler r2 bucket create quickmail-attachments`.
+			// `bun run setup` creates this, or: wrangler r2 bucket create <name>
 			"bucket_name": "quickmail-attachments"
 		}
 	],

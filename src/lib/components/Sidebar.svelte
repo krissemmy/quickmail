@@ -3,6 +3,8 @@
 	import Icon from './Icon.svelte';
 	import Logo from './Logo.svelte';
 	import DomainSwitcher from './DomainSwitcher.svelte';
+	import { APP_NAME } from '$lib/constants';
+	import { t } from '$lib/i18n';
 	import type { Domain, MailboxCounts } from '$lib/types';
 
 	let {
@@ -10,15 +12,13 @@
 		domains,
 		activeDomainId,
 		isAdmin,
-		collapsed = $bindable(false),
-		mobileOpen = $bindable(false)
+		collapsed = $bindable(false)
 	}: {
 		counts: MailboxCounts;
 		domains: Domain[];
 		activeDomainId: string | null;
 		isAdmin: boolean;
 		collapsed?: boolean;
-		mobileOpen?: boolean;
 	} = $props();
 
 	type NavItem = {
@@ -31,43 +31,52 @@
 	};
 
 	const mailboxes = $derived<NavItem[]>([
-		{ href: '/inbox', icon: 'inbox-line', label: 'Inbox', badge: counts.inbox_unread },
-		{ href: '/drafts', icon: 'draft-line', label: 'Drafts', count: counts.drafts },
-		{ href: '/sent', icon: 'send-plane-line', label: 'Sent' },
-		{ href: '/starred', icon: 'star-line', label: 'Starred', count: counts.starred },
-		{ href: '/trash', icon: 'delete-bin-line', label: 'Trash', count: counts.trash }
+		{ href: '/inbox', icon: 'inbox-line', label: t('nav.inbox'), badge: counts.inbox_unread },
+		{
+			href: '/inbox?view=archive',
+			icon: 'archive-line',
+			label: t('nav.archive'),
+			count: counts.archive
+		},
+		{ href: '/drafts', icon: 'draft-line', label: t('nav.drafts'), count: counts.drafts },
+		{ href: '/sent', icon: 'send-plane-line', label: t('nav.sent') },
+		{ href: '/starred', icon: 'star-line', label: t('nav.starred'), count: counts.starred },
+		{ href: '/trash', icon: 'delete-bin-line', label: t('nav.trash'), count: counts.trash }
 	]);
 
 	const tools = $derived<NavItem[]>([
-		{ href: '/settings', icon: 'user-settings-line', label: 'Settings' },
-		...(isAdmin ? [{ href: '/admin', icon: 'settings-3-line', label: 'Admin' }] : [])
+		{ href: '/settings', icon: 'user-settings-line', label: t('nav.settings') },
+		...(isAdmin ? [{ href: '/admin', icon: 'settings-3-line', label: t('nav.admin') }] : [])
 	]);
 
 	function isActive(href: string): boolean {
-		return $page.url.pathname === href || $page.url.pathname.startsWith(`${href}/`);
+		const [pathname, query = ''] = href.split('?');
+		if ($page.url.pathname !== pathname && !$page.url.pathname.startsWith(`${pathname}/`)) {
+			return false;
+		}
+
+		// Inbox and Archive share the same route; the view query distinguishes them.
+		if (pathname === '/inbox') {
+			const expectedView = new URLSearchParams(query).get('view');
+			const currentView = $page.url.searchParams.get('view');
+			return expectedView ? currentView === expectedView : currentView !== 'archive';
+		}
+
+		return true;
 	}
 </script>
 
-{#if mobileOpen}
-	<button
-		type="button"
-		class="scrim"
-		aria-label="Close navigation"
-		onclick={() => (mobileOpen = false)}
-	></button>
-{/if}
-
-<aside class="sidebar" class:collapsed class:mobile-open={mobileOpen}>
+<aside class="sidebar" class:collapsed>
 	<div class="sidebar-top">
-		<a href="/inbox" class="brand" title="Mail">
+		<a href="/inbox" class="brand" title={APP_NAME}>
 			<Logo size={30} />
-			{#if !collapsed}<span class="brand-name">Mail</span>{/if}
+			{#if !collapsed}<span class="brand-name">{APP_NAME}</span>{/if}
 		</a>
 	</div>
 
-	<a href="/compose" class="new-message" title="New message">
+	<a href="/compose" class="new-message" title={t('nav.compose')} aria-label={t('nav.compose')}>
 		<Icon name="pencil-line" size={collapsed ? 18 : 16} />
-		{#if !collapsed}<span>New message</span>{/if}
+		{#if !collapsed}<span>{t('nav.compose')}</span>{/if}
 	</a>
 
 	<nav class="nav">
@@ -77,7 +86,6 @@
 				class="nav-link"
 				class:active={isActive(item.href)}
 				title={collapsed ? item.label : undefined}
-				onclick={() => (mobileOpen = false)}
 			>
 				<Icon name={item.icon} size={17} />
 				{#if !collapsed}
@@ -96,7 +104,7 @@
 
 	{#if !collapsed && domains.length > 0}
 		<div class="section">
-			<p class="section-title">Domains</p>
+			<p class="section-title">{t('nav.domains')}</p>
 			<div class="section-body">
 				<DomainSwitcher {domains} {activeDomainId} block />
 			</div>
@@ -110,7 +118,6 @@
 				class="nav-link"
 				class:active={isActive(item.href)}
 				title={collapsed ? item.label : undefined}
-				onclick={() => (mobileOpen = false)}
 			>
 				<Icon name={item.icon} size={17} />
 				{#if !collapsed}<span class="nav-label">{item.label}</span>{/if}
@@ -122,7 +129,7 @@
 		<button
 			type="button"
 			class="collapse-btn"
-			aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+			aria-label={collapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar')}
 			onclick={() => (collapsed = !collapsed)}
 		>
 			<Icon name={collapsed ? 'arrow-right-double-line' : 'arrow-left-double-line'} size={15} />
@@ -307,30 +314,8 @@
 		color: var(--color-text);
 	}
 
-	.scrim {
-		position: fixed;
-		inset: 0;
-		z-index: 35;
-		background: var(--color-scrim);
-	}
-
 	@media (max-width: 900px) {
 		.sidebar {
-			transform: translateX(-100%);
-			box-shadow: var(--shadow-md);
-		}
-
-		.sidebar.mobile-open {
-			transform: none;
-		}
-
-		.scrim {
-			display: block;
-		}
-	}
-
-	@media (min-width: 901px) {
-		.scrim {
 			display: none;
 		}
 	}

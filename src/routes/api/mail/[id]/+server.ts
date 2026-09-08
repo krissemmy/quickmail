@@ -12,12 +12,15 @@ import {
 	markThreadRead,
 	setEmailFlags
 } from '$lib/server/mail-store';
-import { sendAndStore } from '$lib/server/outbox';
+import { resolveReplyFromAddress, sendAndStore } from '$lib/server/outbox';
 import { buildReferences, displaySubject } from '$lib/server/threads';
 import type { OutboundAttachmentInput } from '$lib/types';
 
 type ReplyBody = {
 	fromAddressId?: string;
+	to?: string;
+	cc?: string;
+	bcc?: string;
 	text?: string;
 	html?: string;
 	attachments?: OutboundAttachmentInput[];
@@ -54,18 +57,20 @@ export const PATCH: RequestHandler = async ({ params, request, locals, platform 
 	const body = (await request.json()) as {
 		isRead?: boolean;
 		isStarred?: boolean;
+		archived?: boolean;
 		trashed?: boolean;
 		/** Set to limit the change to this one message instead of the thread. */
 		messageOnly?: boolean;
 	};
 
-	const ids = body.messageOnly
+	const ids = body.messageOnly && body.archived === undefined
 		? [params.id!]
 		: await expandToThreads(db, locals.user.id, [params.id!]);
 
 	const changed = await setEmailFlags(db, locals.user.id, ids, {
 		isRead: body.isRead,
 		isStarred: body.isStarred,
+		archived: body.archived,
 		trashed: body.trashed
 	});
 
@@ -111,17 +116,17 @@ export const POST: RequestHandler = async ({ params, request, locals, platform }
 
 	const subject = /^re:/i.test(original.subject) ? original.subject : `Re: ${original.subject}`;
 	// Replying to our own message continues the conversation with its recipient.
-	const to = original.direction === 'inbound' ? original.from_addr : original.to_addr;
+	const to =
+		body.to?.trim() ||
+		(original.direction === 'inbound' ? original.from_addr : original.to_addr);
+	const cc = body.cc?.trim() || undefined;
+	const bcc = body.bcc?.trim() || undefined;
 
-	// Reply from the address the message was sent to, so threads stay coherent.
-	const preferredAddress =
-		original.direction === 'inbound'
-			? locals.addresses.find(
-					(address) => address.address.toLowerCase() === original.to_addr.toLowerCase()
-				)
-			: locals.addresses.find(
-					(address) => address.address.toLowerCase() === original.from_addr.toLowerCase()
-				);
+	// Reply from the mailbox that received the original. Catch-all mail uses
+	// that exact recipient when the user can send on the domain.
+	const fromAddress = body.fromAddressId
+		? undefined
+		: await resolveReplyFromAddress(db, locals.user, original);
 
 	try {
 		const provider = getEmailProvider(platform);
@@ -130,8 +135,11 @@ export const POST: RequestHandler = async ({ params, request, locals, platform }
 			provider,
 			locals.user,
 			{
-				fromAddressId: body.fromAddressId ?? preferredAddress?.id,
+				fromAddressId: body.fromAddressId,
+				fromAddress,
 				to,
+				cc,
+				bcc,
 				subject,
 				text: body.text,
 				html: body.html,

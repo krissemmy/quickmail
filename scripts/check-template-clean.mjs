@@ -2,7 +2,7 @@
 /**
  * Refuse to ship the template if anything personal leaked into it.
  *
- * QuickMail is maintained alongside a private deployment, so commits get
+ * Quickinbox is maintained alongside a private deployment, so commits get
  * cherry-picked between the two. This is the gate that stops a real API key,
  * a Cloudflare account id, or a personal hostname riding along into the repo
  * that anyone can read.
@@ -21,6 +21,7 @@ const FORBIDDEN = [
 	{ label: 'Resend API key', pattern: /re_[A-Za-z0-9_-]{20,}/ },
 	{ label: 'Webhook signing secret', pattern: /whsec_[A-Za-z0-9+/=_-]{16,}/ },
 	{ label: 'GitHub token', pattern: /\b(ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|gho_[A-Za-z0-9]{30,})\b/ },
+	{ label: 'General Translation API key', pattern: /\bgtx-api-[a-f0-9]{32,}\b/ },
 	{ label: 'Cloudflare API token', pattern: /\bCLOUDFLARE_API_TOKEN\s*[:=]\s*["']?[A-Za-z0-9_-]{30,}/ },
 	{ label: 'Private key block', pattern: /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/ },
 	{ label: 'Live Cloudflare account id', pattern: /^\s*"account_id"\s*:\s*"[0-9a-f]{32}"/m },
@@ -90,6 +91,15 @@ if (!existsSync(wranglerPath)) {
 	const route = wrangler.match(/^\s*"pattern"\s*:\s*"([^"]+)"/m);
 	if (route && !route[1].includes('example.com')) {
 		fail(`wrangler.jsonc has a live route pattern: ${route[1]} — it should stay commented out`);
+	}
+	// The dashboard treats every wrangler var as a required HTML input.
+	// Prefill with example.com (never an empty string) so Resend can deploy
+	// and Cloudflare users can replace it on the form.
+	const domainsVar = wrangler.match(/^\s*"CLOUDFLARE_MAIL_DOMAINS"\s*:\s*"([^"]*)"/m);
+	if (!domainsVar || domainsVar[1] === '') {
+		fail(
+			'wrangler.jsonc must set CLOUDFLARE_MAIL_DOMAINS to a non-empty placeholder such as example.com'
+		);
 	}
 }
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { APP_NAME } from '$lib/constants';
 	import type { EmailProviderKind } from '$lib/types';
 	import CloudflareMark from './CloudflareMark.svelte';
 	import Logo from './Logo.svelte';
@@ -17,7 +18,7 @@
 
 <div class="partner" aria-label={caption}>
 	<div class="partner-marks">
-		<span class="mark" title="Mail">
+		<span class="mark" title={APP_NAME}>
 			<Logo {size} />
 		</span>
 
@@ -57,6 +58,7 @@
 
 	.mark {
 		display: flex;
+		overflow: hidden;
 		border-radius: 0.775rem;
 		box-shadow: var(--shadow-sm);
 		animation: mark-in 520ms cubic-bezier(0.22, 0.61, 0.36, 1) both;

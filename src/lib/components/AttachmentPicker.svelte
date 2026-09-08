@@ -2,12 +2,19 @@
 	import Icon from './Icon.svelte';
 	import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_EMAIL } from '$lib/constants';
 	import type { OutboundAttachmentInput } from '$lib/types';
+	import { t } from '$lib/i18n';
 
 	let {
-		attachments = $bindable([])
+		attachments = $bindable([]),
+		mode = 'full'
 	}: {
 		attachments?: OutboundAttachmentInput[];
+		/** `button` is icon-only; `chips` lists files; `full` is both. */
+		mode?: 'full' | 'button' | 'chips';
 	} = $props();
+
+	const showButton = $derived(mode === 'full' || mode === 'button');
+	const showChips = $derived(mode === 'full' || mode === 'chips');
 
 	let input = $state<HTMLInputElement | null>(null);
 	let error = $state('');
@@ -18,12 +25,12 @@
 
 		for (const file of files) {
 			if (attachments.length >= MAX_ATTACHMENTS_PER_EMAIL) {
-				error = `Max ${MAX_ATTACHMENTS_PER_EMAIL} files`;
+				error = t('compose.maxFiles', { count: MAX_ATTACHMENTS_PER_EMAIL });
 				break;
 			}
 			if (file.size > MAX_ATTACHMENT_BYTES) {
 				const limitMb = MAX_ATTACHMENT_BYTES / (1024 * 1024);
-				error = `"${file.name}" exceeds ${limitMb}MB`;
+				error = t('compose.fileTooLarge', { name: file.name, limit: limitMb });
 				continue;
 			}
 
@@ -58,29 +65,40 @@
 	}
 </script>
 
-<div class="flex flex-wrap items-center gap-2">
-	<button type="button" class="attach-btn" onclick={() => input?.click()}>
-		<Icon name="attachment-2" size={16} />
-		<span>Attach</span>
-	</button>
+<div class="picker" class:compact={mode === 'button'}>
+	{#if showButton}
+		<button
+			type="button"
+			class="attach-btn"
+			aria-label={t('attach.attach')}
+			onclick={() => input?.click()}
+		>
+			<Icon name="attachment-2" size={16} />
+			{#if mode !== 'button'}
+				<span>{t('attach.attach')}</span>
+			{/if}
+		</button>
 
-	<input
-		bind:this={input}
-		type="file"
-		multiple
-		class="hidden"
-		onchange={(event) => addFiles(event.currentTarget.files)}
-	/>
+		<input
+			bind:this={input}
+			type="file"
+			multiple
+			class="hidden"
+			onchange={(event) => addFiles(event.currentTarget.files)}
+		/>
+	{/if}
 
-	{#each attachments as file, index (file.filename + index)}
-		<span class="attachment-chip">
-			<Icon name="file-3-line" size={14} />
-			<span class="max-w-[140px] truncate">{file.filename}</span>
-			<button type="button" class="chip-remove" aria-label="Remove" onclick={() => remove(index)}>
-				<Icon name="close-line" size={14} />
-			</button>
-		</span>
-	{/each}
+	{#if showChips}
+		{#each attachments as file, index (file.filename + index)}
+			<span class="attachment-chip">
+				<Icon name="file-3-line" size={14} />
+				<span class="max-w-[140px] truncate">{file.filename}</span>
+				<button type="button" class="chip-remove" aria-label={t('common.remove')} onclick={() => remove(index)}>
+					<Icon name="close-line" size={14} />
+				</button>
+			</span>
+		{/each}
+	{/if}
 </div>
 
 {#if error}
@@ -88,6 +106,18 @@
 {/if}
 
 <style>
+	.picker {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.picker.compact {
+		flex-wrap: nowrap;
+		gap: 0;
+	}
+
 	.attach-btn {
 		display: inline-flex;
 		align-items: center;
@@ -125,5 +155,14 @@
 
 	.chip-remove:hover {
 		color: var(--color-text);
+	}
+
+	.picker.compact .attach-btn {
+		width: var(--touch-target);
+		height: var(--touch-target);
+		padding: 0;
+		border-radius: 0.75rem;
+		background: transparent;
+		justify-content: center;
 	}
 </style>

@@ -12,7 +12,15 @@ const config = {
 				configPath: 'wrangler.jsonc',
 				persist: { path: '.wrangler/state/v3' }
 			}
-		})
+		}),
+		// Vite's unbundled worker fails in the browser. Production registration
+		// lives in registerAppServiceWorker().
+		alias: {
+			$themes: 'src/themes'
+		},
+		serviceWorker: {
+			register: false
+		}
 	}
 };
 

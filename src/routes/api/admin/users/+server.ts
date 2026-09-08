@@ -1,5 +1,5 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
-import { createUser, listUsers } from '$lib/server/auth';
+import { createUser, deletePendingUser, listUsers } from '$lib/server/auth';
 import { createAddress, getDomain, listAllAddresses } from '$lib/server/domains';
 
 export const GET: RequestHandler = async ({ locals, platform }) => {
@@ -31,6 +31,7 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
 		domainId?: string;
 		localPart?: string;
 		password?: string;
+		isAdmin?: boolean;
 	};
 
 	if (!body.name?.trim() || !body.localPart?.trim() || !body.domainId) {
@@ -48,12 +49,16 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
 
 	const localPart = body.localPart.trim().toLowerCase().replace(/@.*$/, '');
 
+	let createdUserId: string | null = null;
 	try {
 		const user = await createUser(db, {
 			email: `${localPart}@${domain.name}`,
 			name: body.name,
-			password: body.password
+			password: body.password,
+			isAdmin: body.isAdmin === true,
+			mustChangePassword: true
 		});
+		createdUserId = user.id;
 
 		const address = await createAddress(db, {
 			userId: user.id,
@@ -63,6 +68,13 @@ export const POST: RequestHandler = async ({ request, locals, platform }) => {
 
 		return json({ user, address }, { status: 201 });
 	} catch (error) {
+		if (createdUserId) {
+			try {
+				await deletePendingUser(db, createdUserId);
+			} catch (cleanupError) {
+				console.error('Failed to roll back user after mailbox creation failed', cleanupError);
+			}
+		}
 		return json(
 			{ error: error instanceof Error ? error.message : 'Failed to create user' },
 			{ status: 400 }

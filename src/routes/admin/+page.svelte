@@ -1,6 +1,13 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
+	import StackHeader from '$lib/components/StackHeader.svelte';
 	import AddressField from '$lib/components/AddressField.svelte';
+	import Check from '$lib/components/Check.svelte';
+	import { APP_NAME } from '$lib/constants';
+	import { formatDeviceActivity } from '$lib/device-activity';
+	import { plural, t } from '$lib/i18n';
+	import { page } from '$app/stores';
+	import { providerName } from '$lib/provider-copy';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -9,6 +16,7 @@
 	let newUserDomainId = $state('');
 	let name = $state('');
 	let password = $state('');
+	let makeAdmin = $state(false);
 
 	$effect(() => {
 		if (!newUserDomainId && data.domains[0]) {
@@ -17,6 +25,12 @@
 	});
 	let userError = $state('');
 	let creatingUser = $state(false);
+
+	let deleteError = $state('');
+	let deletingUser = $state<string | null>(null);
+
+	let roleError = $state('');
+	let changingRole = $state<string | null>(null);
 
 	let connecting = $state<string | null>(null);
 	let domainError = $state('');
@@ -28,9 +42,15 @@
 	}
 
 	function userLabel(userId: string | null) {
-		if (!userId) return 'Nobody (unrouted mail is held)';
+		if (!userId) return t('admin.nobodyUnrouted');
 		const match = data.users.find((user) => user.id === userId);
-		return match ? `${match.name} (${match.email})` : 'Unknown user';
+		return match ? `${match.name} (${match.email})` : t('admin.unknownUser');
+	}
+
+	function devicePlatform(value: string | null) {
+		if (value === 'ios') return t('settings.ios');
+		if (value === 'android') return t('settings.android');
+		return t('admin.mobile');
 	}
 
 	async function createUser(event: SubmitEvent) {
@@ -42,18 +62,82 @@
 			const res = await fetch('/api/admin/users', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ name, localPart, domainId: newUserDomainId, password })
+				body: JSON.stringify({
+					name,
+					localPart,
+					domainId: newUserDomainId,
+					password,
+					isAdmin: makeAdmin
+				})
 			});
 			const body = await res.json();
 			if (!res.ok) {
-				userError = body.error ?? 'Failed to create user';
+				userError = body.error ?? t('admin.failedCreateUser');
 				return;
 			}
 			window.location.reload();
 		} catch {
-			userError = 'Network error';
+			userError = t('common.networkError');
 		} finally {
 			creatingUser = false;
+		}
+	}
+
+	/**
+	 * The server refuses demoting the last admin, so that error surfaces here
+	 * rather than being second-guessed in the UI.
+	 */
+	async function setRole(userId: string, isAdmin: boolean) {
+		roleError = '';
+		changingRole = userId;
+
+		try {
+			const res = await fetch(`/api/admin/users/${userId}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ isAdmin })
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				roleError = body.error ?? t('admin.couldNotChangeRole');
+				return;
+			}
+			window.location.reload();
+		} catch {
+			roleError = t('common.networkError');
+		} finally {
+			changingRole = null;
+		}
+	}
+
+	/**
+	 * The server refuses self-deletion and the last remaining admin, so those
+	 * errors surface here rather than being pre-empted in the UI.
+	 */
+	async function removeUser(userId: string, label: string) {
+		if (
+			!confirm(
+				t('admin.deleteUserConfirm', { label })
+			)
+		) {
+			return;
+		}
+
+		deleteError = '';
+		deletingUser = userId;
+
+		try {
+			const res = await fetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				deleteError = body.error ?? t('admin.failedDeleteUser');
+				return;
+			}
+			window.location.reload();
+		} catch {
+			deleteError = t('common.networkError');
+		} finally {
+			deletingUser = null;
 		}
 	}
 
@@ -69,12 +153,12 @@
 			});
 			const body = await res.json();
 			if (!res.ok) {
-				domainError = body.error ?? 'Could not connect that domain';
+				domainError = body.error ?? t('onboarding.couldNotConnect');
 				return;
 			}
 			window.location.reload();
 		} catch {
-			domainError = 'Network error';
+			domainError = t('common.networkError');
 		} finally {
 			connecting = null;
 		}
@@ -89,14 +173,14 @@
 		});
 		const body = await res.json();
 		if (!res.ok) {
-			domainError = body.error ?? 'Update failed';
+			domainError = body.error ?? t('admin.updateFailed');
 			return;
 		}
 		window.location.reload();
 	}
 
 	async function disconnect(domainId: string, domainName: string) {
-		if (!confirm(`Stop using ${domainName} in this dashboard? Mail already received is kept.`)) {
+		if (!confirm(t('admin.disconnectDomainConfirm', { domain: domainName }))) {
 			return;
 		}
 
@@ -106,11 +190,11 @@
 </script>
 
 <svelte:head>
-	<title>Admin — Mail</title>
+	<title>{t('admin.title', { app: APP_NAME })}</title>
 </svelte:head>
 
 <div class="admin-page">
-	<h1>Admin</h1>
+	<StackHeader title={t('nav.admin')} back={false} />
 
 	{#if data.loadError}
 		<div class="surface-lg banner">
@@ -120,13 +204,8 @@
 	{/if}
 
 	<section class="surface-lg admin-card">
-		<h2><Icon name="global-line" size={18} /> Domains</h2>
-		<p class="card-hint">
-			Connected domains send and receive through {data.providerKind === 'cloudflare'
-				? 'Cloudflare Email'
-				: 'Resend'}. Catch-all decides who gets mail addressed to an unknown mailbox on that
-			domain.
-		</p>
+		<h2><Icon name="global-line" size={18} /> {t('nav.domains')}</h2>
+		<p class="card-hint">{t('admin.domainsHint')}</p>
 
 		<ul class="domain-list">
 			{#each data.domains as domain (domain.id)}
@@ -135,22 +214,20 @@
 						<div class="min-w-0">
 							<p class="domain-name">{domain.name}</p>
 							<p class="domain-sub">
-								{addressesFor(domain.id).length} address{addressesFor(domain.id).length === 1
-									? ''
-									: 'es'}
+								{plural($page.data.locale, 'admin.addressCount', 'admin.addressCountPlural', addressesFor(domain.id).length)}
 								{#if domain.region}· {domain.region}{/if}
 							</p>
 						</div>
 						<div class="chips">
-							<span class="chip" class:chip-on={domain.sending_enabled}>send</span>
-							<span class="chip" class:chip-on={domain.receiving_enabled}>receive</span>
+							<span class="chip" class:chip-on={domain.sending_enabled}>{t('settings.send')}</span>
+							<span class="chip" class:chip-on={domain.receiving_enabled}>{t('settings.receive')}</span>
 							<span class="chip" class:chip-ok={domain.status === 'verified'}>{domain.status}</span>
 						</div>
 					</div>
 
 					<div class="domain-controls">
 						<label class="control">
-							<span class="control-label">Catch-all</span>
+							<span class="control-label">{t('admin.catchall')}</span>
 							<select
 								value={domain.catchall_user_id ?? ''}
 								onchange={(event) =>
@@ -158,7 +235,7 @@
 										catchallUserId: (event.currentTarget as HTMLSelectElement).value || null
 									})}
 							>
-								<option value="">Nobody (hold as unrouted)</option>
+								<option value="">{t('admin.nobodyHold')}</option>
 								{#each data.users as user (user.id)}
 									<option value={user.id}>{user.name} — {user.email}</option>
 								{/each}
@@ -171,14 +248,14 @@
 								class="btn-ghost text-xs"
 								onclick={() => updateDomain(domain.id, { refresh: true })}
 							>
-								<Icon name="refresh-line" size={14} /> Re-sync
+								<Icon name="refresh-line" size={14} /> {t('admin.resync')}
 							</button>
 							<button
 								type="button"
 								class="btn-ghost text-xs"
 								onclick={() => disconnect(domain.id, domain.name)}
 							>
-								Disconnect
+								{t('common.disconnect')}
 							</button>
 						</div>
 					</div>
@@ -186,17 +263,15 @@
 					{#if !domain.receiving_enabled}
 						<p class="hint">
 							<Icon name="information-line" size={13} />
-							Inbound is off for this domain — enable receiving
 							{data.providerKind === 'cloudflare'
-								? "and point Email Routing's catch-all at this Worker"
-								: 'and add the MX record at the provider'}
-							to get mail.
+								? t('admin.inboundOffRouting')
+								: t('admin.inboundOffMx')}
 						</p>
 					{/if}
 					{#if domain.catchall_user_id}
 						<p class="hint">
 							<Icon name="user-received-line" size={13} />
-							Unmatched mail goes to {userLabel(domain.catchall_user_id)}.
+							{t('admin.goesTo', { label: userLabel(domain.catchall_user_id) })}
 						</p>
 					{/if}
 				</li>
@@ -206,7 +281,7 @@
 		{#if connectable.length > 0}
 			<div class="connect-block">
 				<p class="connect-title">
-					Available in {data.providerKind === 'cloudflare' ? 'Cloudflare Email' : 'Resend'}
+					{t('admin.availableIn', { provider: providerName(data.providerKind) })}
 				</p>
 				<ul class="connect-list">
 					{#each connectable as domain (domain.id)}
@@ -221,7 +296,7 @@
 								disabled={connecting === domain.id}
 								onclick={() => connect(domain.id)}
 							>
-								{connecting === domain.id ? 'Connecting…' : 'Connect'}
+								{connecting === domain.id ? t('common.connecting') : t('common.connect')}
 							</button>
 						</li>
 					{/each}
@@ -234,38 +309,46 @@
 
 	<div class="admin-grid">
 		<section class="surface-lg admin-card">
-			<h2><Icon name="user-add-line" size={18} /> New user</h2>
-			<p class="card-hint">
-				Their address is also their login — they can sign in and use it straight away.
-			</p>
+			<h2><Icon name="user-add-line" size={18} /> {t('admin.newUser')}</h2>
+			<p class="card-hint">{t('admin.newUserHint')}</p>
 			<form class="mt-4 space-y-3" onsubmit={createUser}>
-				<input type="text" bind:value={name} required placeholder="Display name" class="admin-input" />
+				<input type="text" bind:value={name} required placeholder={t('admin.displayName')} class="admin-input" />
 				<AddressField
 					bind:localPart
 					bind:domainId={newUserDomainId}
 					domains={data.domains}
 					placeholder="name"
-					label="Address"
+					label={t('settings.addressLabel')}
 				/>
 				<input
 					type="text"
 					bind:value={password}
 					required
 					minlength="8"
-					placeholder="Temporary password"
+					placeholder={t('admin.temporaryPassword')}
 					class="admin-input"
 				/>
+
+				<div class="role-row">
+					<Check
+						label={t('admin.makeAdmin')}
+						caption={t('nav.admin')}
+						checked={makeAdmin}
+						onchange={(next) => (makeAdmin = next)}
+					/>
+					<span class="role-hint">{t('admin.roleHint')}</span>
+				</div>
 
 				{#if userError}<p class="error">{userError}</p>{/if}
 
 				<button type="submit" disabled={creatingUser} class="btn-primary">
-					{creatingUser ? 'Creating…' : 'Create'}
+					{creatingUser ? t('common.creating') : t('common.create')}
 				</button>
 			</form>
 		</section>
 
 		<section class="surface-lg admin-card">
-			<h2><Icon name="group-line" size={18} /> {data.users.length} users</h2>
+			<h2><Icon name="group-line" size={18} /> {plural($page.data.locale, 'admin.usersCount', 'admin.usersCountPlural', data.users.length)}</h2>
 			<ul class="user-list">
 				{#each data.users as user (user.id)}
 					<li class="user-row">
@@ -278,27 +361,83 @@
 									.map((address) => address.address)
 									.join(', ') || user.email}
 							</p>
+							{#if user.must_change_password}
+								<p class="user-status">{t('admin.pendingAccountSetup')}</p>
+							{/if}
 						</div>
-						{#if user.is_admin}
-							<span class="admin-badge">Admin</span>
+						{#if user.id === data.user?.id}
+							{#if user.is_admin}
+								<span class="admin-badge">{t('nav.admin')}</span>
+							{/if}
+						{:else}
+							<Check
+								label={user.is_admin
+									? t('admin.removeAdminFrom', { name: user.name })
+									: t('admin.makeNamedAdmin', { name: user.name })}
+								caption={t('nav.admin')}
+								checked={user.is_admin}
+								disabled={changingRole === user.id}
+								onchange={(next) => setRole(user.id, next)}
+							/>
+						{/if}
+						{#if user.id !== data.user?.id}
+							<button
+								type="button"
+								class="user-delete"
+								title={t('admin.deleteNamed', { name: user.name })}
+								aria-label={t('admin.deleteNamed', { name: user.name })}
+								disabled={deletingUser === user.id}
+								onclick={() => removeUser(user.id, user.name)}
+							>
+								<Icon name="delete-bin-line" size={16} />
+							</button>
 						{/if}
 					</li>
 				{/each}
 			</ul>
+			{#if roleError}<p class="error">{roleError}</p>{/if}
+			{#if deleteError}<p class="error">{deleteError}</p>{/if}
 		</section>
 	</div>
 
+	<section class="surface-lg admin-card">
+		<h2><Icon name="smartphone-line" size={18} /> {t('admin.mobileDevices')}</h2>
+		<p class="card-hint">
+			{t('admin.mobileDevicesHint')}
+		</p>
+
+		{#if data.devices.length > 0}
+			<ul class="device-list">
+				{#each data.devices as device (device.id)}
+					<li class="device-row">
+						<div class="device-icon" aria-hidden="true">
+							<Icon name="smartphone-line" size={16} />
+						</div>
+						<div class="min-w-0 flex-1">
+							<p class="user-name">{device.device_name ?? t('admin.mobileDevice')}</p>
+							<p class="user-email">{device.user_name} · {device.user_email}</p>
+						</div>
+						<div class="device-detail">
+							<p>{devicePlatform(device.device_platform)}</p>
+							<p>{formatDeviceActivity(device.last_seen_at, $page.data.locale)}</p>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{:else}
+			<p class="hint">{t('admin.noMobileDevices')}</p>
+		{/if}
+	</section>
+
 	{#if data.unrouted.length > 0}
 		<section class="surface-lg admin-card">
-			<h2><Icon name="question-mark" size={18} /> Unrouted mail</h2>
-			<p class="card-hint">
-				Received on a connected domain but no address matched and no catch-all was set.
-			</p>
+			<h2><Icon name="question-mark" size={18} /> {t('admin.unrouted')}</h2>
+			<p class="card-hint">{t('admin.unroutedHint')}</p>
 			<ul class="user-list">
 				{#each data.unrouted as item (item.id)}
 					<li class="user-row">
 						<div class="min-w-0 flex-1">
-							<p class="user-name">{item.subject || '(no subject)'}</p>
+							<p class="user-name">{item.subject || t('mailbox.noSubject')}</p>
 							<p class="user-email">{item.from_addr} → {item.to_addr}</p>
 						</div>
 					</li>
@@ -309,10 +448,8 @@
 </div>
 
 <style>
-	.admin-page h1 {
-		font-size: 1.375rem;
-		font-weight: 600;
-		letter-spacing: -0.02em;
+	.admin-page :global(.stack-header) {
+		margin-bottom: 0;
 	}
 
 	.banner {
@@ -359,6 +496,12 @@
 		margin-top: 0.375rem;
 		font-size: 0.8125rem;
 		line-height: 1.5;
+		color: var(--color-muted);
+	}
+
+	.user-status {
+		margin-top: 0.1875rem;
+		font-size: 0.6875rem;
 		color: var(--color-muted);
 	}
 
@@ -508,6 +651,52 @@
 		margin-top: 1rem;
 	}
 
+	.device-list {
+		margin-top: 1rem;
+	}
+
+	.device-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.75rem 0;
+	}
+
+	.device-row + .device-row {
+		box-shadow: inset 0 1px 0 var(--color-line);
+	}
+
+	.device-icon {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.25rem;
+		height: 2.25rem;
+		border-radius: 0.75rem;
+		color: var(--color-text-secondary);
+		background: var(--color-surface-muted);
+	}
+
+	.device-detail {
+		flex-shrink: 0;
+		text-align: right;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+	}
+
+	@media (max-width: 36rem) {
+		.device-row {
+			align-items: flex-start;
+			flex-wrap: wrap;
+		}
+
+		.device-detail {
+			width: 100%;
+			padding-left: 3rem;
+			text-align: left;
+		}
+	}
+
 	.user-row {
 		display: flex;
 		align-items: center;
@@ -554,9 +743,66 @@
 		background: var(--color-surface-muted);
 	}
 
+	.role-row {
+		display: flex;
+		align-items: center;
+		gap: 0.625rem;
+		flex-wrap: wrap;
+	}
+
+	.role-hint {
+		font-size: 0.75rem;
+		color: var(--color-muted);
+	}
+
+	.user-delete {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border: none;
+		border-radius: 0.5rem;
+		color: var(--color-muted);
+		background: transparent;
+		cursor: pointer;
+		transition: color 0.15s, background 0.15s;
+	}
+
+	.user-delete:hover:not(:disabled) {
+		color: var(--color-danger);
+		background: var(--color-surface-muted);
+	}
+
+	.user-delete:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px var(--color-focus-halo);
+	}
+
+	.user-delete:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+
+	@media (max-width: 900px) {
+		.user-delete {
+			width: var(--touch-target);
+			height: var(--touch-target);
+		}
+	}
+
 	.error {
 		margin-top: 0.5rem;
 		font-size: 0.8125rem;
 		color: var(--color-danger);
+	}
+
+	@media (max-width: 900px) {
+		.admin-card {
+			padding: 1.25rem 1rem;
+			box-shadow: none;
+		}
 	}
 </style>

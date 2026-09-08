@@ -3,7 +3,19 @@ export type User = {
 	email: string;
 	name: string;
 	is_admin: boolean;
+	must_change_password: boolean;
 	created_at: string;
+};
+
+export type ApiScope = 'mail:send' | 'mail:read' | 'admin';
+
+export type ApiTokenSummary = {
+	id: string;
+	name: string;
+	preview: string;
+	scopes: ApiScope[];
+	created_at: string;
+	last_used_at: string | null;
 };
 
 export type DeliveryStatus =
@@ -50,17 +62,21 @@ export type MailAddress = {
 	domain_id: string;
 	domain_name: string;
 	address: string;
+	/** From display name on outbound mail. Falls back to the account name. */
 	label: string | null;
 	is_default: boolean;
+	/** Sign-off for this mailbox. Falls back to the account signature when empty. */
+	signature: string | null;
 	created_at: string;
 };
 
 /** The mailboxes the sidebar can show. Drafts/Trash are flags, not folders. */
-export type MailboxView = 'inbox' | 'starred' | 'drafts' | 'sent' | 'trash';
+export type MailboxView = 'inbox' | 'archive' | 'starred' | 'drafts' | 'sent' | 'trash';
 
 export type MailboxCounts = {
 	inbox: number;
 	inbox_unread: number;
+	archive: number;
 	starred: number;
 	drafts: number;
 	sent: number;
@@ -72,6 +88,7 @@ export type EmailRow = {
 	user_id: string;
 	direction: 'inbound' | 'outbound';
 	from_addr: string;
+	from_name: string | null;
 	to_addr: string;
 	cc_addr: string | null;
 	bcc_addr: string | null;
@@ -87,6 +104,8 @@ export type EmailRow = {
 	/** Subject with Re:/Fwd: stripped — backs subject-based thread matching. */
 	thread_key: string | null;
 	domain_id: string | null;
+	/** The registered address that received the message; null for catch-all. */
+	address_id: string | null;
 	provider_id: string | null;
 	status: MailStatus | null;
 	status_at: string | null;
@@ -94,6 +113,7 @@ export type EmailRow = {
 	is_read: number;
 	is_starred: number;
 	deleted_at: string | null;
+	archived_at: string | null;
 	created_at: string;
 };
 
@@ -108,8 +128,10 @@ export type EmailSummary = {
 	is_read: boolean;
 	is_starred: boolean;
 	is_draft: boolean;
+	is_archived: boolean;
 	has_attachments: boolean;
 	domain_id: string | null;
+	address_id: string | null;
 	status: DeliveryStatus | null;
 	created_at: string;
 };
@@ -136,8 +158,11 @@ export type ThreadSummary = {
 	is_read: boolean;
 	is_starred: boolean;
 	is_draft: boolean;
+	is_archived: boolean;
 	has_attachments: boolean;
 	domain_id: string | null;
+	/** Which registered address the newest message arrived on, when known. */
+	address_id: string | null;
 	/** Delivery state of the newest message, when we sent it. */
 	status: DeliveryStatus | null;
 	created_at: string;
@@ -148,6 +173,8 @@ export type MailboxFilters = {
 	unreadOnly: boolean;
 	starredOnly: boolean;
 	attachmentsOnly: boolean;
+	/** Registered address to narrow the list to; empty for all addresses. */
+	addressId: string;
 };
 
 export type MailboxPage = {
@@ -163,6 +190,7 @@ export type ThreadMessage = {
 	id: string;
 	direction: 'inbound' | 'outbound';
 	from_addr: string;
+	from_name: string | null;
 	to_addr: string;
 	cc_addr: string | null;
 	subject: string;
@@ -175,6 +203,7 @@ export type ThreadMessage = {
 	is_read: boolean;
 	is_starred: boolean;
 	deleted_at: string | null;
+	archived_at: string | null;
 	created_at: string;
 	attachments: EmailAttachmentMeta[];
 };

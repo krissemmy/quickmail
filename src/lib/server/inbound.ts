@@ -2,9 +2,10 @@ import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
 import type { DeliveryStatus } from '$lib/types';
 import { insertAttachmentBytes } from './attachments';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_EMAIL, MAX_BODY_BYTES } from './constants';
-import { collectInboundRecipients, parseEmailAddress } from './email-address';
+import { collectInboundRecipients, parseEmailIdentity } from './email-address';
 import { recordUnroutedEmail, resolveInboundRoute } from './domains';
 import { emailExistsByProviderId, insertEmail, updateEmailStatusByProviderId } from './mail-store';
+import { scheduleNewMailNotification, type PushNotificationEnv } from './push-notifications';
 import type { ResendClient } from './resend';
 
 export type ResendWebhookEvent = {
@@ -18,7 +19,7 @@ export type WebhookOutcome = {
 	note: string;
 };
 
-type InboundEnv = { DB: D1Database; ATTACHMENTS: R2Bucket };
+type InboundEnv = PushNotificationEnv & { ATTACHMENTS: R2Bucket };
 
 /** Resend delivery events → the status we display on a sent message. */
 const STATUS_BY_EVENT: Record<string, DeliveryStatus> = {
@@ -97,7 +98,8 @@ async function handleInboundEmail(
 		bcc: received.bcc
 	});
 
-	const from = parseEmailAddress(received.from ?? '');
+	const sender = parseEmailIdentity(received.headers?.['from'] ?? received.from ?? '');
+	const from = sender.address;
 	const subject = received.subject?.trim() || '(no subject)';
 	const route = await resolveInboundRoute(env.DB, recipients);
 
@@ -116,6 +118,7 @@ async function handleInboundEmail(
 		userId: route.userId,
 		direction: 'inbound',
 		from,
+		fromName: sender.name,
 		to: route.address,
 		cc: received.cc?.join(', ') || null,
 		subject,
@@ -128,10 +131,17 @@ async function handleInboundEmail(
 		// chain still carries the message that started the conversation.
 		references: received.headers?.['references'] ?? null,
 		domainId: route.domainId,
+		addressId: route.addressId,
 		providerId
 	});
 
 	await storeInboundAttachments(env, client, providerId, emailId);
+	await scheduleNewMailNotification(env, {
+		emailId,
+		userId: route.userId,
+		from: sender.name || from,
+		subject
+	});
 
 	return {
 		handled: true,

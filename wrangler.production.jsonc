@@ -5,13 +5,8 @@
 	"compatibility_date": "2026-08-18",
 	"compatibility_flags": ["nodejs_compat", "enable_nodejs_http_modules"],
 	"workers_dev": false,
-
-	"routes": [
-		{
-			"pattern": "mail.krissemmy.com",
-			"custom_domain": true
-		}
-	],
+	// mail.krissemmy.com is managed in Cloudflare so CI only needs account-level
+	// Worker permissions and cannot accidentally replace the production route.
 
 	"assets": {
 		"directory": ".svelte-kit/cloudflare",

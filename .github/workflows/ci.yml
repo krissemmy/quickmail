@@ -37,7 +37,9 @@ jobs:
     name: Deploy to Cloudflare
     runs-on: ubuntu-latest
     needs: verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     concurrency:
       group: quickmail-production
       cancel-in-progress: false
@@ -90,9 +92,24 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Check translation credentials
+        id: credentials
+        env:
+          GT_API_KEY: ${{ secrets.GT_API_KEY }}
+          GT_PROJECT_ID: ${{ secrets.GT_PROJECT_ID }}
+        run: |
+          if [ -n "$GT_API_KEY" ] && [ -n "$GT_PROJECT_ID" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Translation skipped because GT credentials are not configured."
+          fi
+
       - uses: actions/checkout@v5
+        if: steps.credentials.outputs.available == 'true'
 
       - uses: generaltranslation/translate@v0
+        if: steps.credentials.outputs.available == 'true'
         with:
           gt_api_key: ${{ secrets.GT_API_KEY }}
           gt_project_id: ${{ secrets.GT_PROJECT_ID }}

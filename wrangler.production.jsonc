@@ -1,0 +1,52 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "krissemmy-mail",
+	"main": ".svelte-kit/cloudflare/_worker.js",
+	"compatibility_date": "2026-08-18",
+	"compatibility_flags": ["nodejs_compat", "enable_nodejs_http_modules"],
+	"workers_dev": false,
+
+	"routes": [
+		{
+			"pattern": "mail.krissemmy.com",
+			"custom_domain": true
+		}
+	],
+
+	"assets": {
+		"directory": ".svelte-kit/cloudflare",
+		"binding": "ASSETS"
+	},
+
+	"vars": {
+		"EMAIL_PROVIDER": "resend",
+		"CLOUDFLARE_MAIL_DOMAINS": "example.com"
+	},
+
+	"send_email": [
+		{
+			"name": "EMAIL",
+			"remote": true
+		}
+	],
+
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "quickmail",
+			"database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+			"migrations_dir": "migrations"
+		}
+	],
+
+	"r2_buckets": [
+		{
+			"binding": "ATTACHMENTS",
+			"bucket_name": "quickmail-attachments"
+		}
+	],
+
+	"observability": {
+		"enabled": true
+	}
+}
